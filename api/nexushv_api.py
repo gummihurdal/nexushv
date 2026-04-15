@@ -63,6 +63,21 @@ log = logging.getLogger("nexushv-api")
 
 # ── Configuration ─────────────────────────────────────────────────────────
 JWT_SECRET = os.getenv("NEXUSHV_JWT_SECRET", secrets.token_hex(32))
+
+# ── Simple TTL Cache ──────────────────────────────────────────────────────
+_cache: dict[str, tuple[float, object]] = {}
+
+def cached(key: str, ttl: float = 2.0):
+    """Simple TTL cache decorator for expensive endpoints."""
+    now = time.time()
+    if key in _cache:
+        ts, val = _cache[key]
+        if now - ts < ttl:
+            return val
+    return None
+
+def set_cache(key: str, value: object):
+    _cache[key] = (time.time(), value)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = 24
 RATE_LIMIT_REQUESTS = 100  # per minute per IP
@@ -476,7 +491,13 @@ async def login(req: LoginRequest, request: Request):
     ip = request.client.host if request.client else "unknown"
     with get_db() as db:
         row = db.execute("SELECT * FROM users WHERE username = ? AND active = 1", (req.username,)).fetchone()
-        if not row or not bcrypt.checkpw(req.password.encode(), row["password_hash"].encode()):
+        if not row:
+            audit_log(req.username, "login_failed", ip=ip, success=False)
+            raise HTTPException(401, "Invalid credentials")
+        # Run bcrypt in thread pool to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        pw_valid = await loop.run_in_executor(None, bcrypt.checkpw, req.password.encode(), row["password_hash"].encode())
+        if not pw_valid:
             audit_log(req.username, "login_failed", ip=ip, success=False)
             raise HTTPException(401, "Invalid credentials")
         token = create_token(row["username"], row["role"])
@@ -828,6 +849,9 @@ def revert_snapshot(name: str, snap: str, request: Request):
 @app.get("/api/hosts/local", tags=["Hosts"])
 def local_host_info():
     """Get local host information including CPU, RAM, disk, and network."""
+    c = cached("host_info", ttl=2.0)
+    if c is not None:
+        return c
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage("/")
     cpu_freq = psutil.cpu_freq()
@@ -841,7 +865,7 @@ def local_host_info():
         "cpu_count": psutil.cpu_count(),
         "cpu_count_physical": psutil.cpu_count(logical=False),
         "cpu_mhz": round(cpu_freq.current) if cpu_freq else 0,
-        "cpu_pct": psutil.cpu_percent(interval=0.5),
+        "cpu_pct": psutil.cpu_percent(interval=0),
         "cpu_per_core": psutil.cpu_percent(percpu=True),
         "load_avg_1m": round(load_avg[0], 2),
         "load_avg_5m": round(load_avg[1], 2),
@@ -893,6 +917,7 @@ def local_host_info():
             VM_COUNT.labels("poweredOn").set(on)
             VM_COUNT.labels("poweredOff").set(off)
 
+    set_cache("host_info", base)
     return base
 
 # ── Storage Pools ─────────────────────────────────────────────────────────
@@ -953,6 +978,9 @@ def list_networks():
 @app.get("/api/metrics/system", tags=["Metrics"])
 def system_metrics():
     """Get detailed system metrics including per-core CPU, disk I/O, network I/O."""
+    c = cached("system_metrics", ttl=2.0)
+    if c is not None:
+        return c
     cpu_times = psutil.cpu_times_percent()
     disk_io = psutil.disk_io_counters()
     net_io = psutil.net_io_counters()
@@ -964,7 +992,7 @@ def system_metrics():
     except Exception:
         pass
 
-    return {
+    result = {
         "timestamp": time.time(),
         "cpu": {
             "percent_total": psutil.cpu_percent(),
@@ -1005,6 +1033,8 @@ def system_metrics():
         "temperatures": temps,
         "load_average": list(os.getloadavg()),
     }
+    set_cache("system_metrics", result)
+    return result
 
 # ── Prometheus Metrics Endpoint ───────────────────────────────────────────
 @app.get("/metrics", tags=["Observability"])
