@@ -54,3 +54,7 @@ logs/
 *.raw
 *.vmdk
 *.iso
+data/nexushv.db
+logs/*.log
+__pycache__/
+*.pyc
