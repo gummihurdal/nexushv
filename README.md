@@ -1,8 +1,8 @@
-# NexusHV
+# NexusHV v2.0
 
-**Open-source bare-metal hypervisor management platform — a VMware vSphere alternative built on KVM/QEMU.**
+**Production-grade bare-metal hypervisor management platform — a VMware vSphere alternative built on KVM/QEMU.**
 
-> vMotion. HA Failover. PhD-level AI Administrator. All on-premise. Zero licensing costs.
+> vMotion. HA Failover. PhD-level AI Administrator. JWT Auth. Prometheus Metrics. All on-premise. Zero licensing costs.
 
 ---
 
@@ -10,233 +10,282 @@
 
 NexusHV is a production-grade hypervisor management platform that rivals VMware vSphere in functionality while running entirely on open-source infrastructure (KVM + QEMU + Linux). It targets enterprises displaced by Broadcom's VMware price increases.
 
-### Core Features
+### Feature Comparison
 
-| Feature | NexusHV | VMware ESXi |
-|---|---|---|
-| Live Migration (vMotion) | ✅ KVM virDomainMigrate | ✅ |
-| HA Failover + STONITH | ✅ Full IPMI fencing | ✅ |
-| AI Administrator | ✅ Local LLM (no cloud) | ❌ |
-| Proactive Monitoring | ✅ Real-time anomaly detection | ⚠️ Paid add-on |
-| Licensing cost | **Free** | $$$$ |
-| Air-gapped deployment | ✅ | ❌ |
+| Feature | NexusHV v2.0 | VMware vSphere | Proxmox VE |
+|---|---|---|---|
+| Live Migration (vMotion) | KVM native | vMotion | QEMU migrate |
+| HA Failover + STONITH | Full IPMI fencing | vSphere HA | Corosync/HA |
+| AI Administrator | Local LLM (air-gapped) | --- | --- |
+| Proactive Monitoring | AI-powered real-time | Paid add-on | --- |
+| JWT Authentication | HS256 + RBAC | SSO/LDAP | PAM/LDAP |
+| Prometheus Metrics | Native `/metrics` | Paid | Plugin |
+| Right-Sizing AI | Automatic recommendations | --- | --- |
+| Webhook Alerts | Built-in | --- | --- |
+| Audit Trail | SQLite persistent | vRealize | --- |
+| REST API + Docs | OpenAPI/Swagger | SOAP/REST | REST |
+| Air-gapped deployment | Full | No | Partial |
+| Licensing cost | **Free (Apache 2.0)** | $$$$$ | Free (AGPL) |
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    NexusHV Platform                     │
-│                                                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │   React UI   │  │  FastAPI     │  │  NEXUS AI    │  │
-│  │  (vSphere-   │◄─┤  REST API    │◄─┤  Local LLM   │  │
-│  │   familiar)  │  │  WebSocket   │  │  (Ollama)    │  │
-│  └──────────────┘  └──────┬───────┘  └──────────────┘  │
-│                           │                             │
-│  ┌──────────────┐  ┌──────▼───────┐  ┌──────────────┐  │
-│  │  HA Daemon   │  │   libvirt    │  │  KVM / QEMU  │  │
-│  │  (STONITH +  │  │   API layer  │  │  Bare Metal  │  │
-│  │   Raft HA)   │  └──────────────┘  └──────────────┘  │
-│  └──────────────┘                                       │
-└─────────────────────────────────────────────────────────┘
-```
-
----
-
-## Repository Structure
-
-```
-nexushv/
-├── api/
-│   └── nexushv_api.py          # FastAPI REST + WebSocket backend
-│                               # VM CRUD, vMotion, storage, networks
-├── ha/
-│   └── nexushv_ha.py           # HA failover daemon
-│                               # Heartbeats, STONITH fencing, Raft election
-├── ai/
-│   ├── nexushv_ai_local.py     # Local LLM integration (Ollama)
-│   │                           # Proactive scan, streaming chat, cluster context
-│   ├── training/
-│   │   ├── nexushv_train.py    # QLoRA fine-tuning pipeline
-│   │   └── nexushv_dataset.jsonl  # PhD-level virtualization training data
-│   └── model/
-│       └── Modelfile           # Ollama deployment config + system prompt
-├── ui/
-│   ├── nexushv-console.jsx     # Main vSphere-familiar management console
-│   └── nexushv_ha_dashboard.jsx  # HA monitoring dashboard
-├── scripts/
-│   └── install.sh              # Bare-metal installer
-└── docs/
-    └── architecture.md
+┌──────────────────────────────────────────────────────────────┐
+│                     NexusHV v2.0 Platform                    │
+│                                                              │
+│  ┌────────────┐  ┌──────────────┐  ┌────────────────────┐   │
+│  │  React UI  │  │  FastAPI     │  │    NEXUS AI        │   │
+│  │ Dashboard  │◄─┤  REST API    │◄─┤  Local LLM (Ollama)│   │
+│  │ vSphere UI │  │  WebSocket   │  │  Proactive Scan    │   │
+│  │ HA Panel   │  │  Prometheus  │  │  Right-Sizing      │   │
+│  │ AI Chat    │  │  JWT Auth    │  │  Safe Commands     │   │
+│  │ Alerts     │  │  Rate Limit  │  └────────────────────┘   │
+│  └────────────┘  └──────┬───────┘                            │
+│                         │                                    │
+│  ┌────────────┐  ┌──────▼───────┐  ┌────────────────────┐   │
+│  │ HA Engine  │  │   libvirt    │  │  SQLite Database   │   │
+│  │ Quorum     │  │   KVM/QEMU  │  │  Users, Audit Log  │   │
+│  │ Split-Brain│  │   virsh      │  │  Alerts, Metrics   │   │
+│  │ STONITH    │  └──────────────┘  └────────────────────┘   │
+│  └────────────┘                                              │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Prerequisites (Ubuntu 22.04 / Debian 12)
+### Option 1: Production Install (recommended)
 
 ```bash
-# Install KVM + libvirt
-apt install -y qemu-kvm libvirt-daemon-system libvirt-clients \
-               bridge-utils python3-pip
-
-# Verify KVM
-kvm-ok
-
-# Enable libvirt
-systemctl enable --now libvirtd
+git clone https://github.com/gummihurdal/nexushv
+cd nexushv
+sudo bash scripts/install.sh
 ```
 
-### 2. Install NexusHV API
+This installs to `/opt/nexushv` with systemd services.
+
+### Option 2: Development Setup
 
 ```bash
 git clone https://github.com/gummihurdal/nexushv
 cd nexushv
 
-pip install fastapi uvicorn libvirt-python psutil websockets httpx
+# Python backend
+python3 -m venv venv && source venv/bin/activate
+pip install fastapi uvicorn libvirt-python psutil httpx aiofiles \
+            pyjwt bcrypt prometheus-client aiosqlite python-multipart
 
-# Start the API
+# Start API (auto-detects KVM or runs in demo mode)
 python3 api/nexushv_api.py
-# API running at http://0.0.0.0:8080
+# API: http://localhost:8080
+# Docs: http://localhost:8080/api/docs
+# Metrics: http://localhost:8080/metrics
+
+# Start HA daemon
+python3 ha/nexushv_ha.py --standalone --port 8081
+
+# Frontend (development)
+cd ui && npm install && npm run dev
 ```
 
-### 3. Start HA Daemon (on each host)
+### Default Credentials
 
-```bash
-# Run on every cluster host:
-pip install pyghmi aiofiles
-
-python3 ha/nexushv_ha.py \
-  --host 10.0.1.10 \
-  --peers 10.0.1.11,10.0.1.12 \
-  --port 8081
+```
+Username: admin
+Password: admin
 ```
 
-### 4. Deploy NEXUS AI (Local LLM)
-
-```bash
-# Install Ollama
-curl -fsSL https://ollama.ai/install.sh | sh
-
-# After fine-tuning (see ai/training/):
-ollama create nexushv-ai -f ai/model/Modelfile
-
-# Or use base Llama3 while training your fine-tune:
-ollama pull llama3.1:8b
-```
-
-### 5. Fine-tune the AI
-
-```bash
-# Install training dependencies
-pip install transformers peft trl bitsandbytes accelerate datasets
-
-# Run QLoRA fine-tuning (~4h on RTX 4090)
-python3 ai/training/nexushv_train.py
-
-# Merge + export
-python3 ai/training/nexushv_train.py merge
-
-# Convert to GGUF (requires llama.cpp)
-git clone https://github.com/ggerganov/llama.cpp && cd llama.cpp && make -j
-python convert_hf_to_gguf.py ../nexushv-ai-merged --outtype f16
-./llama-quantize nexushv-ai-f16.gguf nexushv-ai-Q4_K_M.gguf Q4_K_M
-
-# Deploy
-ollama create nexushv-ai -f ../nexushv/ai/model/Modelfile
-```
+**Change immediately** after first login.
 
 ---
 
-## NEXUS AI — The PhD Administrator
+## API Endpoints
 
-NEXUS AI is a locally-running LLM fine-tuned on virtualization expertise. It runs on the bare-metal host via Ollama — no cloud calls, no API keys, fully air-gapped.
+### Authentication
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/auth/login` | Get JWT token |
+| GET | `/api/auth/me` | Current user info |
+| POST | `/api/auth/users` | Create user (admin) |
+| GET | `/api/auth/users` | List users (admin) |
 
-**Expertise covers:**
-- KVM/QEMU internals (VMCS, EPT violations, VM-exit paths)
-- CPU virtualization (Intel VT-x, AMD-V, VPID, TSC)
-- Memory virtualization (shadow page tables, EPT/NPT, KSM, ballooning)
-- Storage (QCOW2 L1/L2 structure, cache modes, io_uring, thin provisioning)
-- Networking (OVS, DPDK, SR-IOV, VirtIO-net, vhost-user)
-- Live migration (pre-copy, post-copy, auto-converge, RDMA)
-- HA (STONITH, split-brain, admission control, Raft)
-- Performance tuning (NUMA, CPU pinning, iothreads, huge pages)
+### Virtual Machines
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/vms` | List all VMs |
+| GET | `/api/vms/{name}` | Get VM details |
+| POST | `/api/vms` | Create VM |
+| POST | `/api/vms/{name}/action` | Start/stop/reboot/suspend |
+| DELETE | `/api/vms/{name}` | Delete VM |
+| POST | `/api/vms/{name}/migrate` | Live migrate (vMotion) |
+| GET | `/api/vms/{name}/snapshots` | List snapshots |
+| POST | `/api/vms/{name}/snapshots` | Create snapshot |
+| GET | `/api/vms/{name}/console` | VNC console details |
+
+### Monitoring & Metrics
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/hosts/local` | Host info (CPU, RAM, disk, network) |
+| GET | `/api/metrics/system` | Detailed system metrics |
+| GET | `/api/metrics/history` | Historical metrics for charting |
+| GET | `/api/dashboard/overview` | Aggregated dashboard data |
+| GET | `/metrics` | Prometheus-compatible metrics |
+| WS | `/ws/metrics` | Real-time WebSocket metrics |
+
+### AI
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/ai/health` | AI/Ollama status |
+| POST | `/api/ai/chat` | Chat with NEXUS AI |
+| POST | `/api/ai/scan` | Proactive health scan |
+| WS | `/ws/ai/stream` | Streaming AI chat |
+
+### Alerts & Operations
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/alerts` | Get alerts |
+| POST | `/api/alerts/{id}/acknowledge` | Acknowledge alert |
+| GET | `/api/audit` | Audit log (admin) |
+| GET | `/api/recommendations/rightsizing` | AI right-sizing |
+| GET/POST | `/api/webhooks` | Webhook management |
+
+Full interactive docs at **http://localhost:8080/api/docs**
+
+---
+
+## NEXUS AI
+
+NEXUS AI is a locally-running LLM with PhD-level virtualization expertise. Runs via Ollama — no cloud calls, no API keys, fully air-gapped.
+
+### Capabilities
+- **Proactive Health Scanning**: Detects issues before they become failures
+- **Right-Sizing**: Recommends CPU/RAM adjustments based on utilization
+- **Expert Troubleshooting**: KVM internals, QEMU, storage, networking, HA
+- **Safe Command Execution**: Whitelisted read-only commands (virsh, iostat, etc.)
+- **Real-Time Context**: Every response includes live cluster metrics
+
+### Training Data
+The AI is trained on 70+ PhD-level Q&A pairs covering:
+- KVM/QEMU internals (VM-exits, EPT, VMCS)
+- Storage (QCOW2, cache modes, io_uring, NVMe)
+- Networking (SR-IOV, DPDK, vhost-net/user)
+- Memory (ballooning, KSM, NUMA, huge pages)
+- HA (STONITH, split-brain, quorum)
 - Security (sVirt, seccomp, IOMMU, side-channels)
-
-**Proactive monitoring detects:**
-- Disk pools approaching capacity (warns at 70%, alerts at 85%)
-- VM memory balloon inflation indicating host pressure
-- CPU steal time spikes indicating vCPU overcommit
-- Missing backups (>7 days)
-- Single-uplink network configurations (no redundancy)
-- Guest tools outdated
-- Misconfigured NUMA topology
-- Storage fragmentation in aging QCOW2 images
+- Performance tuning (CPU pinning, iothreads)
 
 ---
 
-## vMotion — Live Migration
+## Observability
 
-```bash
-# Via API:
-curl -X POST http://localhost:8080/api/vms/prod-db-01/migrate \
-  -H "Content-Type: application/json" \
-  -d '{"dest_host": "qemu+ssh://10.0.1.11/system", "live": true}'
-
-# Direct virsh:
-virsh migrate --live --auto-converge --compressed \
-  prod-db-01 qemu+ssh://10.0.1.11/system
+### Prometheus
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: 'nexushv'
+    static_configs:
+      - targets: ['localhost:8080']
+    metrics_path: '/metrics'
 ```
 
-Zero-downtime. VM keeps running during memory transfer. Final pause < 200ms.
+### Available Metrics
+- `nexushv_api_requests_total` — Request counter by method/endpoint/status
+- `nexushv_api_request_duration_seconds` — Request latency histogram
+- `nexushv_active_websocket_connections` — Active WebSocket connections
+- `nexushv_vm_count` — VM count by state
+- `nexushv_host_cpu_percent` — Host CPU usage
+- `nexushv_host_ram_percent` — Host RAM usage
+- `nexushv_ai_requests_total` — AI chat requests
+- `nexushv_ai_request_duration_seconds` — AI request latency
+
+### Grafana
+Import `observability/grafana-dashboard.json` for a pre-built dashboard.
 
 ---
 
-## HA Failover
+## Security
 
-When a host fails:
-
-1. **Detect** — UDP multicast heartbeat missed for 6s
-2. **Verify** — check datastore heartbeat (NFS shared storage) to distinguish network split from host crash
-3. **Fence** — STONITH via IPMI powers off the failed host (prevents split-brain)
-4. **Restart** — VMs restarted on surviving hosts in priority order (High → Medium → Low)
-
-Total failover time: typically 30-90 seconds.
+- **JWT Authentication** with bcrypt password hashing
+- **RBAC**: admin, operator, readonly roles
+- **Audit Trail**: Every state-changing action logged to SQLite
+- **Rate Limiting**: 100 requests/min per IP
+- **Input Validation**: Pydantic models with strict patterns
+- **Structured Logging**: JSON logs with rotation (10MB, 5 backups)
 
 ---
 
-## Hardware Requirements
+## Testing
 
-### Production Cluster (minimum)
-- **Hosts**: 3× servers with Intel VT-x/AMD-V + VT-d/AMD-Vi (IOMMU)
-- **RAM**: 64GB+ per host
-- **Storage**: Shared NFS/SAN or local NVMe per host
-- **Network**: 10GbE (dedicated vMotion NIC recommended)
-- **IPMI**: Required for STONITH fencing
+```bash
+# Run all tests (38+ tests)
+source venv/bin/activate
+python -m pytest tests/ -v
 
-### AI Training (one-time)
-- **GPU**: NVIDIA RTX 3090 (24GB) minimum, RTX 4090 recommended
-- **RAM**: 64GB system RAM
-- **Time**: ~4h on RTX 4090, ~12h on RTX 3090
+# Quick check
+python -m pytest tests/ -q
+```
 
-### AI Inference (per host)
-- **GPU**: NVIDIA RTX 3080 10GB or better
-- **CPU fallback**: 64GB RAM (slow but functional)
+---
+
+## Directory Structure
+
+```
+nexushv/
+├── api/
+│   └── nexushv_api.py           # FastAPI backend (JWT, RBAC, metrics)
+├── ha/
+│   └── nexushv_ha.py            # HA engine (quorum, split-brain, STONITH)
+├── ai/
+│   ├── nexushv_ai_local.py      # AI module (Ollama, safe commands)
+│   └── training/
+│       ├── nexushv_train.py     # QLoRA fine-tuning pipeline
+│       └── nexushv_dataset.jsonl # Training data (70+ Q&A pairs)
+├── ui/
+│   ├── src/
+│   │   ├── App.jsx              # Main app (5 tabs)
+│   │   ├── Dashboard.jsx        # Real-time dashboard with WebSocket
+│   │   ├── AIChat.jsx           # AI chat interface
+│   │   └── Alerts.jsx           # Alert management panel
+│   ├── nexushv-console.jsx      # vSphere-familiar management console
+│   └── nexushv_ha_dashboard.jsx # HA monitoring dashboard
+├── tests/
+│   └── test_api.py              # 42+ API tests
+├── scripts/
+│   ├── install.sh               # Production installer
+│   ├── nexushv-supervisor.sh    # Process manager
+│   ├── nexushv-api.service      # Systemd service
+│   └── nexushv-ha.service       # Systemd service
+├── observability/
+│   ├── prometheus.yml           # Prometheus config
+│   └── grafana-dashboard.json   # Grafana dashboard
+├── docs/
+│   ├── runbooks/                # Operational runbooks
+│   └── adr/                     # Architecture Decision Records
+├── data/                        # SQLite database (auto-created)
+└── logs/                        # Log files (auto-created)
+```
 
 ---
 
 ## Roadmap
 
-- [ ] DRS (Distributed Resource Scheduling) — auto load balancing
-- [ ] vSAN equivalent — distributed block storage via Ceph
-- [ ] NSX equivalent — software-defined networking
-- [ ] Web installer ISO (like Proxmox VE installer)
-- [ ] NEXUS AI fine-tune dataset expansion (2,000+ Q&A pairs)
+- [x] JWT Authentication + RBAC
+- [x] Prometheus metrics
+- [x] SQLite persistence (audit, alerts, metrics)
+- [x] Real-time Dashboard with WebSocket
+- [x] AI right-sizing recommendations
+- [x] Webhook notifications
+- [x] Quorum-based HA with split-brain detection
+- [x] 42+ automated tests
+- [ ] DRS (Distributed Resource Scheduling)
+- [ ] Ceph/RBD storage backend
+- [ ] noVNC console integration
+- [ ] OAuth2/OIDC authentication
 - [ ] Multi-datacenter federation
-- [ ] Kubernetes integration (KubeVirt backend)
+- [ ] Kubernetes integration (KubeVirt)
 
 ---
 
@@ -245,7 +294,5 @@ Total failover time: typically 30-90 seconds.
 Apache 2.0 — free for commercial use.
 
 ---
-
-## Author
 
 Built by [gummihurdal](https://github.com/gummihurdal)
