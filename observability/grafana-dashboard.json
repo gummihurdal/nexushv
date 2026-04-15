@@ -1,0 +1,145 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "nexushv-main",
+    "title": "NexusHV Hypervisor Dashboard",
+    "tags": ["nexushv", "kvm", "hypervisor"],
+    "timezone": "browser",
+    "schemaVersion": 30,
+    "version": 1,
+    "refresh": "10s",
+    "time": { "from": "now-1h", "to": "now" },
+    "panels": [
+      {
+        "id": 1,
+        "title": "API Request Rate",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+        "targets": [
+          {
+            "expr": "rate(nexushv_api_requests_total[5m])",
+            "legendFormat": "{{method}} {{endpoint}} {{status}}"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "API Request Latency (p99)",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, rate(nexushv_api_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "p99 latency"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Host CPU Usage",
+        "type": "gauge",
+        "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+        "targets": [
+          { "expr": "nexushv_host_cpu_percent", "legendFormat": "CPU %" }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 70 },
+                { "color": "red", "value": 90 }
+              ]
+            },
+            "max": 100, "min": 0, "unit": "percent"
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Host RAM Usage",
+        "type": "gauge",
+        "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+        "targets": [
+          { "expr": "nexushv_host_ram_percent", "legendFormat": "RAM %" }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 75 },
+                { "color": "red", "value": 90 }
+              ]
+            },
+            "max": 100, "min": 0, "unit": "percent"
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "Host Disk Usage",
+        "type": "gauge",
+        "gridPos": { "h": 6, "w": 6, "x": 12, "y": 8 },
+        "targets": [
+          { "expr": "nexushv_host_disk_percent", "legendFormat": "Disk %" }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 75 },
+                { "color": "red", "value": 90 }
+              ]
+            },
+            "max": 100, "min": 0, "unit": "percent"
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Active WebSocket Connections",
+        "type": "stat",
+        "gridPos": { "h": 6, "w": 6, "x": 18, "y": 8 },
+        "targets": [
+          { "expr": "nexushv_active_websocket_connections", "legendFormat": "WebSocket" }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "VM Count by State",
+        "type": "piechart",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 14 },
+        "targets": [
+          { "expr": "nexushv_vm_count", "legendFormat": "{{state}}" }
+        ]
+      },
+      {
+        "id": 8,
+        "title": "AI Request Rate",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 14 },
+        "targets": [
+          { "expr": "rate(nexushv_ai_requests_total[5m])", "legendFormat": "AI requests/s" }
+        ]
+      },
+      {
+        "id": 9,
+        "title": "AI Request Latency",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 14 },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(nexushv_ai_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "p95"
+          },
+          {
+            "expr": "histogram_quantile(0.50, rate(nexushv_ai_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "p50"
+          }
+        ]
+      }
+    ]
+  }
+}
