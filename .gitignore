@@ -1,0 +1,56 @@
+## Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+env/
+
+## AI / ML — large model files
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+nexushv-ai-*/
+nexushv-ai-lora/
+nexushv-ai-merged/
+
+## Node / React
+node_modules/
+.next/
+dist/
+*.tsbuildinfo
+
+## Secrets
+.env
+.env.*
+*.key
+*.pem
+secrets.json
+
+## OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+## IDE
+.vscode/
+.idea/
+*.iml
+
+## Logs
+*.log
+logs/
+
+## Libvirt
+*.qcow2
+*.raw
+*.vmdk
+*.iso
