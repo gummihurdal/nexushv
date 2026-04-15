@@ -292,3 +292,40 @@ class TestPrometheus:
         r = client.get("/metrics")
         assert r.status_code == 200
         assert b"nexushv_" in r.content
+
+
+class TestWebhooks:
+    def test_list_webhooks(self):
+        r = client.get("/api/webhooks")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_add_webhook(self):
+        r = client.post("/api/webhooks?url=http://example.com/hook&events=alert,vm_action")
+        assert r.status_code == 200
+        assert r.json()["status"] == "created"
+
+    def test_remove_webhook(self):
+        client.post("/api/webhooks?url=http://example.com/to-remove")
+        r = client.delete("/api/webhooks?url=http://example.com/to-remove")
+        assert r.status_code == 200
+
+
+class TestRightSizing:
+    def test_rightsizing_recommendations(self):
+        r = client.get("/api/recommendations/rightsizing")
+        assert r.status_code == 200
+        data = r.json()
+        assert "recommendations" in data
+        assert "summary" in data
+
+
+class TestDashboard:
+    def test_dashboard_overview(self):
+        r = client.get("/api/dashboard/overview")
+        assert r.status_code == 200
+        data = r.json()
+        assert "vms" in data
+        assert "host" in data
+        assert "resources" in data
+        assert "alerts" in data

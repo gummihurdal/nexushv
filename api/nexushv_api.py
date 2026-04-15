@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 
 import jwt
 import bcrypt
+import httpx
 
 # ── Logging with rotation ─────────────────────────────────────────────────
 LOG_DIR = os.path.join(os.path.dirname(__file__), "..", "logs")
@@ -1327,6 +1328,185 @@ async def shutdown():
     if _metrics_history_task:
         _metrics_history_task.cancel()
     log.info("NexusHV API shutting down")
+
+# ── Webhooks ──────────────────────────────────────────────────────────────
+_webhooks: list[dict] = []  # in-memory; persisted in settings
+
+@app.get("/api/webhooks", tags=["Webhooks"])
+def list_webhooks():
+    """List configured webhook endpoints."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'webhooks'").fetchone()
+        if row:
+            return json.loads(row["value"])
+    return []
+
+@app.post("/api/webhooks", tags=["Webhooks"])
+def add_webhook(url: str, events: str = "alert,failover,vm_action"):
+    """Add a webhook endpoint for event notifications."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'webhooks'").fetchone()
+        hooks = json.loads(row["value"]) if row else []
+        hook = {"url": url, "events": events.split(","), "active": True, "created": datetime.now(timezone.utc).isoformat()}
+        hooks.append(hook)
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webhooks', ?)", (json.dumps(hooks),))
+    return {"status": "created", "webhook": hook}
+
+@app.delete("/api/webhooks", tags=["Webhooks"])
+def remove_webhook(url: str):
+    """Remove a webhook endpoint."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'webhooks'").fetchone()
+        hooks = json.loads(row["value"]) if row else []
+        hooks = [h for h in hooks if h["url"] != url]
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('webhooks', ?)", (json.dumps(hooks),))
+    return {"status": "removed"}
+
+async def _fire_webhooks(event_type: str, data: dict):
+    """Fire webhooks for an event (non-blocking)."""
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key = 'webhooks'").fetchone()
+            if not row:
+                return
+            hooks = json.loads(row["value"])
+        for hook in hooks:
+            if hook.get("active") and event_type in hook.get("events", []):
+                try:
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        await client.post(hook["url"], json={
+                            "event": event_type,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "data": data,
+                            "source": "nexushv",
+                        })
+                except Exception as e:
+                    log.warning(f"Webhook delivery failed to {hook['url']}: {e}")
+    except Exception as e:
+        log.error(f"Webhook error: {e}")
+
+# ── Right-Sizing Recommendations ─────────────────────────────────────────
+@app.get("/api/recommendations/rightsizing", tags=["Recommendations"])
+def rightsizing_recommendations():
+    """AI-driven right-sizing recommendations based on VM utilization patterns."""
+    if not DEMO_MODE:
+        return {"recommendations": [], "note": "Right-sizing requires metrics history (available in demo mode)"}
+
+    _mock_vm_tick()
+    recommendations = []
+
+    for vm in _MOCK_VMS:
+        if vm["state"] != "poweredOn":
+            continue
+
+        # CPU right-sizing
+        avg_cpu = vm["cpu_pct"]
+        if avg_cpu < 15 and vm["cpu"] > 1:
+            recommended_cpu = max(1, vm["cpu"] // 2)
+            savings_pct = round((1 - recommended_cpu / vm["cpu"]) * 100)
+            recommendations.append({
+                "vm": vm["name"],
+                "type": "cpu_downsize",
+                "current": f"{vm['cpu']} vCPU",
+                "recommended": f"{recommended_cpu} vCPU",
+                "reason": f"Average CPU usage {avg_cpu}% — consistently underutilized",
+                "savings": f"{savings_pct}% CPU reduction",
+                "risk": "SAFE",
+                "command": f"virsh setvcpus {vm['name']} {recommended_cpu} --config",
+            })
+        elif avg_cpu > 85:
+            recommended_cpu = min(vm["cpu"] * 2, 64)
+            recommendations.append({
+                "vm": vm["name"],
+                "type": "cpu_upsize",
+                "current": f"{vm['cpu']} vCPU",
+                "recommended": f"{recommended_cpu} vCPU",
+                "reason": f"Average CPU usage {avg_cpu}% — potential bottleneck",
+                "savings": "Improved performance",
+                "risk": "REQUIRES_DOWNTIME",
+                "command": f"virsh setvcpus {vm['name']} {recommended_cpu} --config",
+            })
+
+        # RAM right-sizing
+        ram_pct = vm["ram_used_pct"]
+        ram_gb = vm["ram_mb"] // 1024
+        if ram_pct < 25 and ram_gb > 2:
+            recommended_ram = max(2, ram_gb // 2)
+            recommendations.append({
+                "vm": vm["name"],
+                "type": "ram_downsize",
+                "current": f"{ram_gb} GB",
+                "recommended": f"{recommended_ram} GB",
+                "reason": f"RAM usage at {ram_pct}% — over-provisioned",
+                "savings": f"{ram_gb - recommended_ram} GB freed",
+                "risk": "REQUIRES_DOWNTIME",
+                "command": f"virsh setmem {vm['name']} {recommended_ram}G --config",
+            })
+        elif ram_pct > 90:
+            recommended_ram = min(ram_gb * 2, 512)
+            recommendations.append({
+                "vm": vm["name"],
+                "type": "ram_upsize",
+                "current": f"{ram_gb} GB",
+                "recommended": f"{recommended_ram} GB",
+                "reason": f"RAM usage at {ram_pct}% — risk of OOM or swap thrashing",
+                "savings": "Improved stability",
+                "risk": "REQUIRES_DOWNTIME",
+                "command": f"virsh setmem {vm['name']} {recommended_ram}G --config",
+            })
+
+    total_savings = sum(1 for r in recommendations if "downsize" in r["type"])
+    return {
+        "recommendations": recommendations,
+        "summary": {
+            "total": len(recommendations),
+            "downsizing": total_savings,
+            "upsizing": len(recommendations) - total_savings,
+        },
+        "analyzed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+# ── Cluster Overview Dashboard Data ──────────────────────────────────────
+@app.get("/api/dashboard/overview", tags=["Dashboard"])
+def dashboard_overview():
+    """Aggregated dashboard data for the UI overview panel."""
+    vms = list_vms()
+    host = local_host_info()
+    storage = list_storage()
+
+    on = len([v for v in vms if v["state"] == "poweredOn"])
+    off = len([v for v in vms if v["state"] == "poweredOff"])
+    suspended = len([v for v in vms if v["state"] == "suspended"])
+
+    total_cpu = sum(v.get("cpu", 0) for v in vms)
+    total_ram_gb = sum(v.get("ram_mb", 0) for v in vms) / 1024
+    total_disk_gb = sum(s.get("capacity_gb", 0) for s in storage)
+    used_disk_gb = sum(s.get("used_gb", 0) for s in storage)
+
+    # Get alert counts
+    with get_db() as db:
+        unack_alerts = db.execute("SELECT COUNT(*) FROM alerts WHERE acknowledged = 0").fetchone()[0]
+        recent_events = db.execute("SELECT COUNT(*) FROM audit_log WHERE ts > datetime('now', '-1 hour')").fetchone()[0]
+
+    return {
+        "vms": {"total": len(vms), "on": on, "off": off, "suspended": suspended},
+        "host": {
+            "cpu_pct": host["cpu_pct"],
+            "ram_pct": host.get("ram_pct", host.get("ram_used_gb", 0) / max(host.get("ram_total_gb", 1), 1) * 100),
+            "disk_pct": host.get("disk_pct", 0),
+            "uptime_seconds": host.get("uptime_seconds", 0),
+        },
+        "resources": {
+            "total_vcpu": total_cpu,
+            "total_ram_gb": round(total_ram_gb, 1),
+            "total_storage_gb": round(total_disk_gb, 1),
+            "used_storage_gb": round(used_disk_gb, 1),
+        },
+        "alerts": {"unacknowledged": unack_alerts},
+        "activity": {"events_last_hour": recent_events},
+        "ai_available": AI_AVAILABLE,
+        "demo_mode": DEMO_MODE,
+    }
 
 # ── Metrics History API ───────────────────────────────────────────────────
 @app.get("/api/metrics/history", tags=["Metrics"])

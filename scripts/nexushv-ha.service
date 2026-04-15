@@ -1,0 +1,27 @@
+[Unit]
+Description=NexusHV HA Failover Engine
+After=network.target nexushv-api.service
+Wants=nexushv-api.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/nexushv
+Environment=PATH=/opt/nexushv/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/nexushv/venv/bin/python3 /opt/nexushv/ha/nexushv_ha.py --standalone --port 8081
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/nexushv/logs/ha-stdout.log
+StandardError=append:/opt/nexushv/logs/ha-stderr.log
+LimitNOFILE=65535
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/nexushv/logs /var/lib/libvirt
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

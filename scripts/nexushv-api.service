@@ -1,0 +1,28 @@
+[Unit]
+Description=NexusHV Hypervisor Management API
+After=network.target libvirtd.service ollama.service
+Wants=libvirtd.service ollama.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/nexushv
+Environment=PATH=/opt/nexushv/venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=NEXUSHV_JWT_SECRET=change-this-in-production
+ExecStart=/opt/nexushv/venv/bin/python3 /opt/nexushv/api/nexushv_api.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/nexushv/logs/api-stdout.log
+StandardError=append:/opt/nexushv/logs/api-stderr.log
+LimitNOFILE=65535
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/nexushv/data /opt/nexushv/logs /var/lib/libvirt
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
