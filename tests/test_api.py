@@ -1066,3 +1066,130 @@ class TestHAProxy:
     def test_ha_events(self):
         r = client.get("/api/ha/events")
         assert r.status_code == 200
+
+
+# ── Additional Edge Case Tests ────────────────────────────────────────────
+
+class TestEdgeCases:
+    """Edge cases and error handling tests."""
+
+    def test_health_contains_version(self):
+        r = client.get("/health")
+        assert r.json()["version"] == "2.0.0"
+
+    def test_health_contains_checks(self):
+        r = client.get("/health")
+        checks = r.json()["checks"]
+        assert "api" in checks
+        assert "database" in checks
+
+    def test_vm_action_on_nonexistent(self):
+        r = client.post("/api/vms/nonexistent-vm-xyz/action", json={"action": "start"})
+        assert r.status_code == 404
+
+    def test_create_vm_empty_name(self):
+        r = client.post("/api/vms", json={"name": "", "cpu": 1, "ram_gb": 1, "disk_gb": 10})
+        assert r.status_code == 422
+
+    def test_create_vm_negative_cpu(self):
+        r = client.post("/api/vms", json={"name": "test-neg", "cpu": -1, "ram_gb": 1, "disk_gb": 10})
+        assert r.status_code == 422
+
+    def test_resize_zero_cpu(self):
+        r = client.put("/api/vms/prod-web-01/resize", json={"cpu": 0})
+        assert r.status_code == 422
+
+    def test_search_empty(self):
+        r = client.get("/api/search?q=")
+        assert r.status_code == 200
+        assert r.json()["count"] == 0
+
+    def test_metrics_history_default(self):
+        r = client.get("/api/metrics/history")
+        assert r.status_code == 200
+
+    def test_storage_has_fields(self):
+        r = client.get("/api/storage")
+        pools = r.json()
+        for p in pools:
+            assert "name" in p
+            assert "capacity_gb" in p
+
+    def test_networks_have_fields(self):
+        r = client.get("/api/networks")
+        nets = r.json()
+        for n in nets:
+            assert "name" in n
+            assert "active" in n
+
+    def test_mode_endpoint(self):
+        r = client.get("/api/mode")
+        data = r.json()
+        assert "demo_mode" in data
+        assert "version" in data
+
+    def test_settings_roundtrip(self):
+        client.put("/api/settings/test_roundtrip?value=hello123")
+        r = client.get("/api/settings")
+        assert "test_roundtrip" in r.json()
+
+    def test_vm_notes_roundtrip(self):
+        client.put("/api/vms/prod-web-01/notes?notes=TestNote&tags=test,api")
+        r = client.get("/api/vms/prod-web-01/notes")
+        data = r.json()
+        assert data["notes"] == "TestNote"
+        assert "test" in data["tags"]
+
+
+class TestAPICompleteness:
+    """Verify all major endpoint categories are accessible."""
+
+    def test_dashboard_overview(self):
+        r = client.get("/api/dashboard/overview")
+        assert "vms" in r.json()
+        assert "host" in r.json()
+
+    def test_cluster_topology(self):
+        r = client.get("/api/topology")
+        assert "datacenter" in r.json()
+
+    def test_cluster_compare(self):
+        r = client.get("/api/cluster/compare")
+        assert "hosts" in r.json()
+
+    def test_vm_summary_resources(self):
+        r = client.get("/api/vms/summary/resources")
+        assert "total_vms" in r.json()
+
+    def test_host_local(self):
+        r = client.get("/api/hosts/local")
+        data = r.json()
+        assert "hostname" in data
+        assert "cpu_count" in data
+        assert "ram_total_gb" in data
+
+    def test_ai_history_empty_after_reset(self):
+        client.post("/api/ai/reset")
+        r = client.get("/api/ai/history")
+        assert r.json()["length"] == 0
+
+    def test_power_schedules_lifecycle(self):
+        # Create
+        client.post("/api/power-schedules", json={"vm_name": "lifecycle-test", "action": "stop", "schedule": "23:00"})
+        # List
+        r = client.get("/api/power-schedules")
+        assert any(s["vm_name"] == "lifecycle-test" for s in r.json())
+        # Delete
+        client.delete("/api/power-schedules/lifecycle-test")
+
+    def test_snapshot_policy_lifecycle(self):
+        client.post("/api/snapshot-policies", json={"vm_name": "snap-test", "interval_hours": 12, "max_snapshots": 3})
+        r = client.get("/api/snapshot-policies")
+        assert any(p["vm_name"] == "snap-test" for p in r.json())
+        client.delete("/api/snapshot-policies/snap-test")
+
+    def test_webhook_lifecycle(self):
+        client.post("/api/webhooks?url=http://test-lifecycle.example.com&events=alert")
+        r = client.get("/api/webhooks")
+        assert any("test-lifecycle" in w["url"] for w in r.json())
+        client.delete("/api/webhooks?url=http://test-lifecycle.example.com")
