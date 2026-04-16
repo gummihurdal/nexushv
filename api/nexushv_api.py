@@ -2690,6 +2690,146 @@ def resource_usage_report(hours: int = 24):
         },
     }
 
+# ── VM Cost Estimation ────────────────────────────────────────────────────
+@app.get("/api/costs/estimate", tags=["Cost Management"])
+def cost_estimation(cost_per_vcpu_month: float = 10.0, cost_per_gb_ram_month: float = 5.0, cost_per_gb_disk_month: float = 0.10):
+    """Estimate monthly resource costs per VM for chargeback/showback."""
+    vms = list_vms()
+    costs = []
+    total = 0.0
+    for vm in vms:
+        cpu_cost = vm.get("cpu", 0) * cost_per_vcpu_month
+        ram_cost = vm.get("ram_mb", 0) / 1024 * cost_per_gb_ram_month
+        disk_cost = vm.get("disk_gb", 0) * cost_per_gb_disk_month
+        monthly = round(cpu_cost + ram_cost + disk_cost, 2)
+        total += monthly
+        costs.append({
+            "vm": vm["name"],
+            "state": vm["state"],
+            "cpu": vm.get("cpu", 0),
+            "ram_gb": round(vm.get("ram_mb", 0) / 1024, 1),
+            "disk_gb": vm.get("disk_gb", 0),
+            "monthly_cost": monthly,
+            "breakdown": {
+                "cpu": round(cpu_cost, 2),
+                "ram": round(ram_cost, 2),
+                "disk": round(disk_cost, 2),
+            },
+        })
+    costs.sort(key=lambda c: c["monthly_cost"], reverse=True)
+    return {
+        "costs": costs,
+        "total_monthly": round(total, 2),
+        "pricing": {
+            "vcpu_per_month": cost_per_vcpu_month,
+            "gb_ram_per_month": cost_per_gb_ram_month,
+            "gb_disk_per_month": cost_per_gb_disk_month,
+        },
+        "savings_opportunities": [
+            c for c in costs if c["state"] == "poweredOff" and c["monthly_cost"] > 0
+        ],
+    }
+
+# ── Security Posture Assessment ───────────────────────────────────────────
+@app.get("/api/security/posture", tags=["Security"])
+def security_posture():
+    """Assess the security posture of the NexusHV deployment."""
+    checks = []
+
+    # Check TLS
+    tls_enabled = bool(os.getenv("NEXUSHV_TLS_CERT"))
+    checks.append({"check": "TLS/HTTPS", "status": "pass" if tls_enabled else "fail",
+                   "detail": "API encrypted in transit" if tls_enabled else "API running on HTTP — enable TLS for production"})
+
+    # Check RBAC enforcement
+    checks.append({"check": "RBAC Enforcement", "status": "pass" if ENFORCE_AUTH else "warn",
+                   "detail": "Write operations require authentication" if ENFORCE_AUTH else "RBAC not enforced — set NEXUSHV_ENFORCE_AUTH=true"})
+
+    # Check default password
+    with get_db() as db:
+        admin = db.execute("SELECT password_hash FROM users WHERE username = 'admin'").fetchone()
+        if admin:
+            default_pw = bcrypt.checkpw(b"admin", admin["password_hash"].encode())
+            checks.append({"check": "Default Password", "status": "fail" if default_pw else "pass",
+                          "detail": "Default admin password still in use — change immediately" if default_pw else "Admin password has been changed"})
+
+    # Check JWT secret
+    is_random = len(JWT_SECRET) >= 32 and JWT_SECRET != "change-me-in-production"
+    checks.append({"check": "JWT Secret", "status": "pass" if is_random else "warn",
+                   "detail": "Strong random JWT secret" if is_random else "Set NEXUSHV_JWT_SECRET to a strong random value"})
+
+    # Check disk encryption
+    checks.append({"check": "Disk Encryption", "status": "info",
+                   "detail": "Check with: lsblk -o NAME,FSTYPE,MOUNTPOINT | grep crypt"})
+
+    # Check audit logging
+    with get_db() as db:
+        audit_count = db.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+    checks.append({"check": "Audit Logging", "status": "pass" if audit_count > 0 else "warn",
+                   "detail": f"{audit_count} audit events recorded"})
+
+    passed = sum(1 for c in checks if c["status"] == "pass")
+    failed = sum(1 for c in checks if c["status"] == "fail")
+    warnings = sum(1 for c in checks if c["status"] == "warn")
+
+    score = round(passed / max(len(checks), 1) * 100)
+
+    return {
+        "score": score,
+        "grade": "A" if score >= 90 else "B" if score >= 70 else "C" if score >= 50 else "D",
+        "summary": f"{passed} passed, {failed} failed, {warnings} warnings",
+        "checks": checks,
+        "recommendations": [c["detail"] for c in checks if c["status"] in ("fail", "warn")],
+    }
+
+# ── AI Anomaly Detection ─────────────────────────────────────────────────
+@app.get("/api/anomalies", tags=["Monitoring"])
+def detect_anomalies():
+    """Detect anomalies in system metrics using statistical analysis."""
+    with get_db() as db:
+        # Get recent CPU metrics
+        cpu_rows = db.execute(
+            "SELECT value FROM metrics_history WHERE metric_type = 'host_cpu' AND ts > datetime('now', '-24 hours') ORDER BY ts"
+        ).fetchall()
+        ram_rows = db.execute(
+            "SELECT value FROM metrics_history WHERE metric_type = 'host_ram' AND ts > datetime('now', '-24 hours') ORDER BY ts"
+        ).fetchall()
+
+    anomalies = []
+
+    for metric_name, rows in [("CPU", cpu_rows), ("RAM", ram_rows)]:
+        if len(rows) < 10:
+            continue
+        values = [r["value"] for r in rows]
+        mean = sum(values) / len(values)
+        variance = sum((v - mean) ** 2 for v in values) / len(values)
+        std_dev = variance ** 0.5
+
+        if std_dev < 0.1:
+            continue
+
+        # Check last 5 readings for anomalies (> 2 std deviations from mean)
+        recent = values[-5:]
+        for v in recent:
+            z_score = abs(v - mean) / max(std_dev, 0.01)
+            if z_score > 2.0:
+                anomalies.append({
+                    "metric": f"host_{metric_name.lower()}",
+                    "value": round(v, 1),
+                    "mean": round(mean, 1),
+                    "std_dev": round(std_dev, 1),
+                    "z_score": round(z_score, 2),
+                    "severity": "WARNING" if z_score < 3 else "CRITICAL",
+                    "detail": f"{metric_name} at {v:.1f}% is {z_score:.1f} standard deviations from mean ({mean:.1f}%)",
+                })
+
+    return {
+        "anomalies": anomalies,
+        "analyzed_metrics": ["host_cpu", "host_ram"],
+        "period_hours": 24,
+        "data_points": len(cpu_rows) + len(ram_rows),
+    }
+
 # ── AI Conversation History ──────────────────────────────────────────────
 @app.get("/api/ai/history", tags=["NEXUS AI"])
 def get_ai_history():

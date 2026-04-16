@@ -392,6 +392,41 @@ class TestResize:
         assert r.status_code == 404
 
 
+class TestCostEstimation:
+    def test_cost_estimate(self):
+        r = client.get("/api/costs/estimate")
+        assert r.status_code == 200
+        data = r.json()
+        assert "costs" in data
+        assert "total_monthly" in data
+        assert data["total_monthly"] > 0
+
+    def test_custom_pricing(self):
+        r = client.get("/api/costs/estimate?cost_per_vcpu_month=20&cost_per_gb_ram_month=10")
+        assert r.status_code == 200
+        assert r.json()["total_monthly"] > 0
+
+
+class TestSecurityPosture:
+    def test_security_posture(self):
+        r = client.get("/api/security/posture")
+        assert r.status_code == 200
+        data = r.json()
+        assert "score" in data
+        assert "grade" in data
+        assert "checks" in data
+        assert len(data["checks"]) >= 3
+
+
+class TestAnomalyDetection:
+    def test_detect_anomalies(self):
+        r = client.get("/api/anomalies")
+        assert r.status_code == 200
+        data = r.json()
+        assert "anomalies" in data
+        assert "analyzed_metrics" in data
+
+
 class TestPowerSchedules:
     def test_list_schedules(self):
         r = client.get("/api/power-schedules")
