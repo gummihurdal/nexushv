@@ -436,6 +436,44 @@ class TestDashboard:
         assert "alerts" in data
 
 
+class TestNetworkTopology:
+    def test_network_topology(self):
+        r = client.get("/api/network/topology")
+        assert r.status_code == 200
+        data = r.json()
+        assert "bridges" in data
+        assert "connections" in data
+        assert len(data["bridges"]) >= 1
+
+
+class TestHostProfile:
+    def test_host_profile(self):
+        r = client.get("/api/hosts/local/profile")
+        assert r.status_code == 200
+        data = r.json()
+        assert "cpu" in data
+        assert "memory" in data
+        assert "storage" in data
+        assert "network_interfaces" in data
+
+
+class TestMaintenanceMode:
+    def test_get_maintenance_status(self):
+        r = client.get("/api/hosts/local/maintenance")
+        assert r.status_code == 200
+        assert "maintenance_mode" in r.json()
+
+    def test_enter_exit_maintenance(self):
+        r = client.post("/api/hosts/local/maintenance")
+        assert r.status_code == 200
+        r = client.get("/api/hosts/local/maintenance")
+        assert r.json()["maintenance_mode"] is True
+        r = client.post("/api/hosts/local/maintenance/exit")
+        assert r.status_code == 200
+        r = client.get("/api/hosts/local/maintenance")
+        assert r.json()["maintenance_mode"] is False
+
+
 class TestCapacityPlanning:
     def test_capacity_planning(self):
         r = client.get("/api/planning/capacity")

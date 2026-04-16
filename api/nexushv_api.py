@@ -2085,6 +2085,106 @@ def get_vm_metrics_history(vm_name: str, metric: str = "vm_cpu", hours: int = 24
         ).fetchall()
         return [{"ts": r["ts"], "value": r["value"]} for r in rows]
 
+# ── Network Topology ──────────────────────────────────────────────────────
+@app.get("/api/network/topology", tags=["Networks"])
+def network_topology():
+    """Get network topology showing bridges, VMs, and their connections."""
+    networks = list_networks()
+    vms = list_vms()
+
+    topology = {
+        "bridges": [],
+        "connections": [],
+    }
+
+    for net in networks:
+        bridge = {
+            "name": net["name"],
+            "bridge": net.get("bridge", ""),
+            "active": net.get("active", True),
+            "type": net.get("type", "bridge"),
+            "connected_vms": [],
+        }
+
+        # In demo mode, distribute VMs across networks
+        if DEMO_MODE:
+            if net["name"] == "VM Network":
+                bridge["connected_vms"] = [v["name"] for v in vms if v["state"] == "poweredOn"]
+            elif net["name"] == "Management":
+                bridge["connected_vms"] = [vms[0]["name"]] if vms else []
+
+        topology["bridges"].append(bridge)
+
+        for vm_name in bridge["connected_vms"]:
+            topology["connections"].append({
+                "vm": vm_name,
+                "network": net["name"],
+                "bridge": net.get("bridge", ""),
+            })
+
+    return topology
+
+# ── Host Performance Profile ─────────────────────────────────────────────
+@app.get("/api/hosts/local/profile", tags=["Hosts"])
+def host_performance_profile():
+    """Get detailed host performance profile for capacity planning."""
+    cpu_freq = psutil.cpu_freq()
+    mem = psutil.virtual_memory()
+    disk = psutil.disk_usage("/")
+    partitions = psutil.disk_partitions()
+    net_if = psutil.net_if_addrs()
+    net_stats = psutil.net_if_stats()
+
+    interfaces = []
+    for name, addrs in net_if.items():
+        stats = net_stats.get(name, None)
+        iface = {
+            "name": name,
+            "speed_mbps": stats.speed if stats else 0,
+            "mtu": stats.mtu if stats else 0,
+            "is_up": stats.isup if stats else False,
+            "addresses": [{"family": str(a.family), "address": a.address} for a in addrs[:3]],
+        }
+        interfaces.append(iface)
+
+    disks = []
+    for part in partitions:
+        try:
+            usage = psutil.disk_usage(part.mountpoint)
+            disks.append({
+                "device": part.device,
+                "mountpoint": part.mountpoint,
+                "fstype": part.fstype,
+                "total_gb": round(usage.total / 1024**3, 1),
+                "used_gb": round(usage.used / 1024**3, 1),
+                "free_gb": round(usage.free / 1024**3, 1),
+                "percent": usage.percent,
+            })
+        except (PermissionError, OSError):
+            pass
+
+    return {
+        "cpu": {
+            "model": subprocess.getoutput("cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d: -f2").strip(),
+            "cores_physical": psutil.cpu_count(logical=False),
+            "cores_logical": psutil.cpu_count(),
+            "frequency_mhz": round(cpu_freq.current) if cpu_freq else 0,
+            "frequency_max_mhz": round(cpu_freq.max) if cpu_freq and cpu_freq.max else 0,
+        },
+        "memory": {
+            "total_gb": round(mem.total / 1024**3, 1),
+            "type": "DDR4/DDR5",  # Would need dmidecode for real detection
+        },
+        "storage": disks,
+        "network_interfaces": interfaces,
+        "kernel": subprocess.getoutput("uname -r"),
+        "os": subprocess.getoutput("cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2").strip('"'),
+        "virtualization": {
+            "kvm_available": os.path.exists("/dev/kvm"),
+            "iommu_enabled": "DMAR" in subprocess.getoutput("dmesg 2>/dev/null | grep -c DMAR || echo 0"),
+        },
+    }
+
 # ── Host Maintenance Mode ─────────────────────────────────────────────────
 _maintenance_mode = False
 
