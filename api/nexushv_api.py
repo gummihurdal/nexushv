@@ -2085,6 +2085,48 @@ def get_vm_metrics_history(vm_name: str, metric: str = "vm_cpu", hours: int = 24
         ).fetchall()
         return [{"ts": r["ts"], "value": r["value"]} for r in rows]
 
+# ── Host Maintenance Mode ─────────────────────────────────────────────────
+_maintenance_mode = False
+
+@app.post("/api/hosts/local/maintenance", tags=["Hosts"])
+def enter_maintenance_mode(request: Request):
+    """Enter maintenance mode — prepares host for patching by evacuating VMs.
+    In a multi-host cluster, VMs would be migrated to other hosts."""
+    global _maintenance_mode
+    ip = request.client.host if request and request.client else "unknown"
+    audit_log("system", "enter_maintenance", "localhost", ip=ip)
+    _maintenance_mode = True
+    return {
+        "status": "maintenance_mode_active",
+        "action": "In a multi-host cluster, VMs would be live-migrated to other hosts.",
+        "note": "Use POST /api/hosts/local/maintenance/exit to exit maintenance mode",
+    }
+
+@app.post("/api/hosts/local/maintenance/exit", tags=["Hosts"])
+def exit_maintenance_mode(request: Request):
+    """Exit maintenance mode and resume normal operations."""
+    global _maintenance_mode
+    ip = request.client.host if request and request.client else "unknown"
+    audit_log("system", "exit_maintenance", "localhost", ip=ip)
+    _maintenance_mode = False
+    return {"status": "normal", "maintenance_mode": False}
+
+@app.get("/api/hosts/local/maintenance", tags=["Hosts"])
+def get_maintenance_status():
+    """Check if host is in maintenance mode."""
+    return {"maintenance_mode": _maintenance_mode}
+
+# ── AI Command Execution ─────────────────────────────────────────────────
+@app.post("/api/ai/execute", tags=["NEXUS AI"])
+async def ai_execute_command(command: str):
+    """Execute a safe, read-only command for AI diagnostics.
+    Only whitelisted commands are allowed."""
+    if not AI_AVAILABLE:
+        return {"error": "AI module not available"}
+    result = await ai.execute_command(command)
+    audit_log("ai", "execute_command", command, result.get("output", "")[:100])
+    return result
+
 # ── Real-Time Event WebSocket ─────────────────────────────────────────────
 _event_subscribers: list[WebSocket] = []
 
