@@ -1440,6 +1440,7 @@ def get_mode():
 
 # ── Background Tasks ─────────────────────────────────────────────────────
 _metrics_history_task = None
+_proactive_scan_task = None
 
 async def _record_metrics_history():
     """Periodically record system metrics to database for historical charting."""
@@ -1452,17 +1453,82 @@ async def _record_metrics_history():
                 db.execute("INSERT INTO metrics_history (metric_type, name, value) VALUES ('host_cpu', 'localhost', ?)", (cpu,))
                 db.execute("INSERT INTO metrics_history (metric_type, name, value) VALUES ('host_ram', 'localhost', ?)", (mem,))
                 db.execute("INSERT INTO metrics_history (metric_type, name, value) VALUES ('host_disk', 'localhost', ?)", (disk,))
+
+                # Record per-VM metrics in demo mode
+                if DEMO_MODE:
+                    _mock_vm_tick()
+                    for vm in _MOCK_VMS:
+                        if vm["state"] == "poweredOn":
+                            db.execute("INSERT INTO metrics_history (metric_type, name, value) VALUES ('vm_cpu', ?, ?)", (vm["name"], vm["cpu_pct"]))
+                            db.execute("INSERT INTO metrics_history (metric_type, name, value) VALUES ('vm_ram', ?, ?)", (vm["name"], vm["ram_used_pct"]))
+
                 # Prune old data (keep 7 days)
                 db.execute("DELETE FROM metrics_history WHERE ts < datetime('now', '-7 days')")
         except Exception as e:
             log.error(f"Metrics history recording failed: {e}")
         await asyncio.sleep(60)
 
+async def _proactive_monitor():
+    """Background proactive monitoring — scans cluster every 5 minutes."""
+    await asyncio.sleep(30)  # Wait for services to stabilize
+    while True:
+        try:
+            if AI_AVAILABLE:
+                log.info("Running proactive health scan...")
+                ctx = await _build_cluster_context()
+                issues = await ai.proactive_scan(ctx)
+
+                # Create alerts for CRITICAL/WARNING issues
+                for issue in issues:
+                    if issue.get("severity") in ("CRITICAL", "WARNING"):
+                        # Check if similar alert exists in last hour to avoid duplicates
+                        with get_db() as db:
+                            existing = db.execute(
+                                "SELECT id FROM alerts WHERE title = ? AND ts > datetime('now', '-1 hour') AND acknowledged = 0",
+                                (issue.get("title", ""),)
+                            ).fetchone()
+                            if not existing:
+                                create_alert(
+                                    issue["severity"],
+                                    issue.get("component", ""),
+                                    issue.get("title", "AI Scan Issue"),
+                                    issue.get("technical_detail", "")
+                                )
+                                # Fire webhooks for new alerts
+                                asyncio.create_task(_fire_webhooks("alert", {
+                                    "severity": issue["severity"],
+                                    "title": issue.get("title", ""),
+                                    "component": issue.get("component", ""),
+                                }))
+
+                log.info(f"Proactive scan complete: {len(issues)} issues found")
+            else:
+                # Basic health checks without AI
+                mem = psutil.virtual_memory()
+                disk = psutil.disk_usage("/")
+                if disk.percent > 90:
+                    create_alert("CRITICAL", "Host Storage", f"Disk usage at {disk.percent}%",
+                               f"Root filesystem at {disk.percent}%. Free: {disk.free // (1024**3)}GB")
+                elif disk.percent > 80:
+                    create_alert("WARNING", "Host Storage", f"Disk usage at {disk.percent}%",
+                               f"Root filesystem at {disk.percent}%. Free: {disk.free // (1024**3)}GB")
+                if mem.percent > 95:
+                    create_alert("CRITICAL", "Host Memory", f"RAM usage at {mem.percent}%",
+                               f"Available: {mem.available // (1024**2)}MB")
+                elif mem.percent > 90:
+                    create_alert("WARNING", "Host Memory", f"RAM usage at {mem.percent}%",
+                               f"Available: {mem.available // (1024**2)}MB")
+
+        except Exception as e:
+            log.error(f"Proactive monitoring error: {e}")
+        await asyncio.sleep(300)  # Every 5 minutes
+
 @app.on_event("startup")
 async def startup():
-    global _metrics_history_task
+    global _metrics_history_task, _proactive_scan_task
     _metrics_history_task = asyncio.create_task(_record_metrics_history())
-    log.info("NexusHV API v2.0.0 started — background tasks running")
+    _proactive_scan_task = asyncio.create_task(_proactive_monitor())
+    log.info("NexusHV API v2.0.0 started — background tasks running (metrics + proactive monitoring)")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -1828,6 +1894,49 @@ def get_metrics_history(metric_type: str = "host_cpu", hours: int = 24):
             (metric_type, f"-{min(hours, 168)} hours")
         ).fetchall()
         return [dict(r) for r in rows]
+
+@app.get("/api/metrics/history/{vm_name}", tags=["Metrics"])
+def get_vm_metrics_history(vm_name: str, metric: str = "vm_cpu", hours: int = 24):
+    """Get historical metrics for a specific VM."""
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT ts, value FROM metrics_history WHERE metric_type = ? AND name = ? AND ts > datetime('now', ?) ORDER BY ts",
+            (metric, vm_name, f"-{min(hours, 168)} hours")
+        ).fetchall()
+        return [{"ts": r["ts"], "value": r["value"]} for r in rows]
+
+# ── noVNC WebSocket Proxy Info ────────────────────────────────────────────
+@app.get("/api/vms/{name}/console/websocket", tags=["Virtual Machines"])
+def get_console_websocket(name: str):
+    """Get WebSocket URL for noVNC console access.
+    Returns connection details for the noVNC client to connect."""
+    if DEMO_MODE:
+        return {
+            "websocket_url": f"ws://localhost:6080/websockify?token={name}",
+            "vnc_host": "localhost",
+            "vnc_port": 5900,
+            "token": name,
+            "novnc_html": "/novnc/vnc.html",
+            "note": "noVNC proxy must be running: websockify --web /usr/share/novnc 6080 localhost:5900",
+        }
+    conn = get_conn()
+    try:
+        dom = conn.lookupByName(name)
+        xml = dom.XMLDesc(0)
+        import re
+        m = re.search(r"<graphics type='vnc' port='(\d+)'", xml)
+        port = int(m.group(1)) if m else 5900
+        return {
+            "websocket_url": f"ws://localhost:6080/websockify?token={name}",
+            "vnc_host": "localhost",
+            "vnc_port": port,
+            "token": name,
+            "novnc_html": "/novnc/vnc.html",
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    finally:
+        conn.close()
 
 # ── Serve frontend static files ──────────────────────────────────────────
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "ui", "dist")
