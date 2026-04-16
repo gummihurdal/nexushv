@@ -441,7 +441,15 @@ const CreateVMModal = ({onClose,onCreate}) => {
           <Btn secondary onClick={onClose}>Cancel</Btn>
           {step>0&&<Btn secondary onClick={()=>setStep(s=>s-1)}>← Back</Btn>}
           {step<4&&<Btn onClick={()=>setStep(s=>s+1)}>Next →</Btn>}
-          {step===4&&<Btn col={C.green} onClick={()=>{onCreate(form);onClose();}}>Finish</Btn>}
+          {step===4&&<Btn col={C.green} onClick={()=>{
+            // Call real API to create VM
+            fetch("/api/vms", {
+              method:"POST",
+              headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({name:form.name, os:form.os, cpu:form.cpu, ram_gb:form.ram, disk_gb:form.disk})
+            }).then(()=>onCreate(form)).catch(e=>alert("Failed: "+e.message));
+            onClose();
+          }}>Finish</Btn>}
         </div>
       </div>
     </div>
@@ -540,15 +548,56 @@ export default function VSphere() {
     return ()=>clearInterval(id);
   },[]);
 
+  // Fetch real VM data from API and merge with sparkline data
+  useEffect(()=>{
+    const load = () => {
+      fetch("/api/vms").then(r=>r.json()).then(apiVms=>{
+        if(!Array.isArray(apiVms)) return;
+        setVMs(prev=>{
+          return apiVms.map(av=>{
+            const existing = prev.find(p=>p.name===av.name);
+            const cpuVal = av.cpu_pct || 0;
+            const ramVal = av.ram_used_pct || 0;
+            return {
+              id: av.id || av.name,
+              name: av.name,
+              os: av.os || existing?.os || "Linux",
+              cpu: av.cpu || 2,
+              ram: (av.ram_mb||4096)/1024,
+              disk: av.disk_gb || existing?.disk || 50,
+              hostId: existing?.hostId || "h1",
+              state: av.state,
+              ip: av.ip || existing?.ip || "—",
+              snapshot: existing?.snapshot || false,
+              cpuSpark: existing?.cpuSpark ? [...existing.cpuSpark.slice(1),{t:(existing.cpuSpark.at(-1)?.t||0)+1,v:cpuVal}] : genSparkline(30,cpuVal,10),
+              ramSpark: existing?.ramSpark ? [...existing.ramSpark.slice(1),{t:(existing.ramSpark.at(-1)?.t||0)+1,v:ramVal}] : genSparkline(30,ramVal,5),
+            };
+          });
+        });
+      }).catch(()=>{});
+    };
+    load();
+    const id=setInterval(load,3000);
+    return ()=>clearInterval(id);
+  },[]);
+
   const vmAction=(id,action)=>{
-    setVMs(prev=>prev.map(vm=>vm.id!==id?vm:{
+    // Call real API for VM actions
+    const targetVm = vms.find(v=>v.id===id || v.name===id);
+    if(targetVm){
+      fetch(`/api/vms/${targetVm.name}/action`, {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({action})
+      }).catch(()=>{});
+    }
+    setVMs(prev=>prev.map(vm=>(vm.id!==id&&vm.name!==id)?vm:{
       ...vm,
       state:action==="start"?"poweredOn":action==="stop"?"poweredOff":action==="suspend"?"suspended":vm.state,
       ip:action==="stop"?"—":vm.ip!=="—"?vm.ip:`10.0.2.${Math.floor(Math.random()*200+10)}`,
     }));
-    const vm=vms.find(v=>v.id===id);
     const label={start:"Power On virtual machine",stop:"Power Off virtual machine",suspend:"Suspend virtual machine",reboot:"Restart guest OS"}[action]||action;
-    setTasks(t=>[{id:Date.now(),task:label,target:vm?.name,status:"Completed",time:new Date().toTimeString().slice(0,8),pct:100},...t.slice(0,9)]);
+    setTasks(t=>[{id:Date.now(),task:label,target:targetVm?.name,status:"Completed",time:new Date().toTimeString().slice(0,8),pct:100},...t.slice(0,9)]);
   };
 
   const handleVMotionComplete=(vmId,destHostId)=>{
