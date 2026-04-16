@@ -3154,6 +3154,170 @@ def compare_hosts():
         "recommendation": "Cluster is balanced" if len(hosts) < 2 or abs(hosts[0]["cpu_pct"] - hosts[-1]["cpu_pct"]) < 20 else "Consider migrating VMs from overloaded host",
     }
 
+# ── AI Root Cause Analysis ────────────────────────────────────────────────
+@app.post("/api/ai/analyze-alert", tags=["NEXUS AI"])
+async def ai_analyze_alert(alert_id: int):
+    """Use AI to perform root cause analysis on a specific alert."""
+    if not AI_AVAILABLE:
+        return {"error": "AI not available"}
+
+    with get_db() as db:
+        alert = db.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+        if not alert:
+            raise HTTPException(404, f"Alert {alert_id} not found")
+
+    ctx = await _build_cluster_context()
+    prompt = f"""Perform root cause analysis for this alert:
+
+Alert: [{alert['severity']}] {alert['title']}
+Component: {alert['component']}
+Detail: {alert['detail']}
+Time: {alert['ts']}
+
+{ctx.to_prompt_string()}
+
+Analyze:
+1. What is the most likely root cause?
+2. What evidence supports this conclusion?
+3. What is the impact if left unaddressed?
+4. What specific commands should be run to fix it?
+5. What should be monitored after the fix?
+
+Be specific and reference the actual cluster state shown above."""
+
+    response = await ai.chat(prompt)
+    return {
+        "alert_id": alert_id,
+        "alert_title": alert["title"],
+        "analysis": response,
+    }
+
+# ── VM Dependency Graph ───────────────────────────────────────────────────
+@app.get("/api/dependencies/vms", tags=["Virtual Machines"])
+def vm_dependency_graph():
+    """Get VM dependency graph showing service relationships."""
+    vms = list_vms()
+
+    # Build dependencies from HA policies and naming conventions
+    dependencies = []
+    nodes = []
+
+    for vm in vms:
+        name = vm["name"]
+        nodes.append({
+            "id": name,
+            "state": vm["state"],
+            "cpu": vm.get("cpu", 0),
+            "ram_gb": round(vm.get("ram_mb", 0) / 1024, 1),
+        })
+
+        # Infer dependencies from naming conventions
+        if "web" in name and any("db" in v["name"] for v in vms):
+            db_vm = next((v["name"] for v in vms if "db" in v["name"]), None)
+            if db_vm:
+                dependencies.append({"from": name, "to": db_vm, "type": "requires"})
+
+        if "worker" in name and any("master" in v["name"] for v in vms):
+            master = next((v["name"] for v in vms if "master" in v["name"]), None)
+            if master:
+                dependencies.append({"from": name, "to": master, "type": "requires"})
+
+    # Add dependencies from VM notes (manual)
+    with get_db() as db:
+        notes = db.execute("SELECT vm_name, notes FROM vm_notes WHERE notes LIKE '%depends%'").fetchall()
+        for n in notes:
+            # Parse "depends:vm-name" from notes
+            import re
+            deps = re.findall(r'depends:(\S+)', n["notes"] or "")
+            for dep in deps:
+                dependencies.append({"from": n["vm_name"], "to": dep, "type": "configured"})
+
+    return {
+        "nodes": nodes,
+        "edges": dependencies,
+        "total_vms": len(nodes),
+        "total_dependencies": len(dependencies),
+    }
+
+# ── Remediation Suggestions ──────────────────────────────────────────────
+@app.get("/api/recommendations/all", tags=["Recommendations"])
+def all_recommendations():
+    """Get all recommendations from every analysis engine in one call."""
+    results = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "sources": {},
+    }
+
+    # Right-sizing
+    try:
+        rs = rightsizing_recommendations()
+        results["sources"]["rightsizing"] = {
+            "count": rs["summary"]["total"],
+            "items": rs["recommendations"][:5],
+        }
+    except Exception:
+        results["sources"]["rightsizing"] = {"count": 0, "items": [], "error": "unavailable"}
+
+    # DRS
+    try:
+        drs = drs_recommendations()
+        results["sources"]["drs"] = {
+            "count": len(drs["recommendations"]),
+            "items": drs["recommendations"][:5],
+        }
+    except Exception:
+        results["sources"]["drs"] = {"count": 0, "items": [], "error": "unavailable"}
+
+    # Capacity
+    try:
+        cap = capacity_planning()
+        results["sources"]["capacity"] = {
+            "warnings": cap.get("warnings", []),
+            "headroom_vms": cap["headroom"]["possible_new_vms"],
+        }
+    except Exception:
+        results["sources"]["capacity"] = {"warnings": [], "error": "unavailable"}
+
+    # Storage
+    try:
+        stor = storage_analytics()
+        results["sources"]["storage"] = {
+            "pools_at_risk": stor.get("pools_at_risk", []),
+            "days_until_full": stor["projections"]["est_days_until_full"],
+        }
+    except Exception:
+        results["sources"]["storage"] = {"pools_at_risk": [], "error": "unavailable"}
+
+    # Security
+    try:
+        sec = security_posture()
+        results["sources"]["security"] = {
+            "score": sec["score"],
+            "grade": sec["grade"],
+            "recommendations": sec.get("recommendations", []),
+        }
+    except Exception:
+        results["sources"]["security"] = {"score": 0, "error": "unavailable"}
+
+    # Anomalies
+    try:
+        anom = detect_anomalies()
+        results["sources"]["anomalies"] = {
+            "count": len(anom["anomalies"]),
+            "items": anom["anomalies"][:5],
+        }
+    except Exception:
+        results["sources"]["anomalies"] = {"count": 0, "error": "unavailable"}
+
+    total = sum(
+        s.get("count", len(s.get("warnings", []) + s.get("recommendations", [])))
+        for s in results["sources"].values()
+        if isinstance(s, dict) and "error" not in s
+    )
+    results["total_recommendations"] = total
+
+    return results
+
 # ── Host Process List ─────────────────────────────────────────────────────
 @app.get("/api/hosts/local/processes", tags=["Hosts"])
 def host_processes(top_n: int = 20):

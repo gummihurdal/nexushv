@@ -392,6 +392,34 @@ class TestResize:
         assert r.status_code == 404
 
 
+class TestAIAnalysis:
+    def test_analyze_nonexistent_alert(self):
+        r = client.post("/api/ai/analyze-alert?alert_id=99999")
+        assert r.status_code == 404
+
+
+class TestDependencyGraph:
+    def test_dependency_graph(self):
+        r = client.get("/api/dependencies/vms")
+        assert r.status_code == 200
+        data = r.json()
+        assert "nodes" in data
+        assert "edges" in data
+        assert data["total_vms"] >= 1
+
+
+class TestAllRecommendations:
+    def test_all_recommendations(self):
+        r = client.get("/api/recommendations/all")
+        assert r.status_code == 200
+        data = r.json()
+        assert "sources" in data
+        assert "rightsizing" in data["sources"]
+        assert "drs" in data["sources"]
+        assert "security" in data["sources"]
+        assert "total_recommendations" in data
+
+
 class TestHostProcesses:
     def test_list_processes(self):
         r = client.get("/api/hosts/local/processes?top_n=10")
