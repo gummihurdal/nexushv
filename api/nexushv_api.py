@@ -1344,6 +1344,49 @@ def set_setting(key: str, value: str):
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
     return {"status": "ok", "key": key}
 
+# ── HA Proxy (forward to HA daemon) ───────────────────────────────────────
+HA_URL = os.getenv("NEXUSHV_HA_URL", "http://localhost:8081")
+
+@app.get("/api/ha/status", tags=["HA"])
+async def ha_proxy_status():
+    """Proxy to HA daemon status endpoint."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{HA_URL}/ha/status")
+            return r.json()
+    except Exception as e:
+        return {"error": f"HA daemon unreachable: {e}", "ha_url": HA_URL}
+
+@app.get("/api/ha/health", tags=["HA"])
+async def ha_proxy_health():
+    """Proxy to HA daemon health endpoint."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{HA_URL}/ha/health")
+            return r.json()
+    except Exception as e:
+        return {"status": "unreachable", "error": str(e)}
+
+@app.get("/api/ha/events", tags=["HA"])
+async def ha_proxy_events():
+    """Proxy to HA daemon events endpoint."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{HA_URL}/ha/events")
+            return r.json()
+    except Exception as e:
+        return []
+
+@app.post("/api/ha/simulate/fail/{ip}", tags=["HA"])
+async def ha_proxy_simulate(ip: str):
+    """Proxy to HA daemon failure simulation."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(f"{HA_URL}/ha/simulate/fail/{ip}")
+            return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
 # ── Health check ──────────────────────────────────────────────────────────
 @app.get("/health", tags=["System"])
 def health():

@@ -169,17 +169,43 @@ export default function HADashboard() {
   const [tab,setTab]=useState("overview");
   const [simulating,setSimulating]=useState(false);
   const [simStep,setSimStep]=useState(-1);
+  const [haConnected,setHaConnected]=useState(false);
   const timerRef=useRef();
 
-  // Pulse last_hb to keep HB fresh in demo
+  // Fetch real HA state from API proxy
   useEffect(()=>{
+    const load = () => {
+      fetch("/api/ha/status")
+        .then(r=>r.json())
+        .then(data=>{
+          if(data && !data.error && data.peers){
+            setState(data);
+            setHaConnected(true);
+            if(data.events && data.events.length>0){
+              setEvents(prev=>{
+                const merged=[...data.events,...prev.filter(e=>!data.events.some(de=>Math.abs(de.ts-e.ts)<0.1))];
+                return merged.sort((a,b)=>b.ts-a.ts).slice(0,100);
+              });
+            }
+          }
+        })
+        .catch(()=>setHaConnected(false));
+    };
+    load();
+    const id=setInterval(load,3000);
+    return ()=>clearInterval(id);
+  },[]);
+
+  // Pulse last_hb to keep HB fresh in demo (only if not connected to real HA)
+  useEffect(()=>{
+    if(haConnected) return;
     const id=setInterval(()=>{
       setState(s=>({...s,peers:Object.fromEntries(
         Object.entries(s.peers).map(([ip,p])=>[ip,p.state==="alive"?{...p,last_hb:Date.now()/1000-Math.random()*1.5}:p])
       )}));
     },1200);
     return ()=>clearInterval(id);
-  },[]);
+  },[haConnected]);
 
   const savePolicy=(vm,policy)=>{
     setState(s=>({...s,vm_policies:{...s.vm_policies,[vm]:{...policy,name:vm}}}));
@@ -190,6 +216,22 @@ export default function HADashboard() {
     if(simulating)return;
     setSimulating(true);
     setSimStep(0);
+
+    // If connected to real HA, trigger via API
+    if(haConnected){
+      fetch("/api/ha/simulate/fail/10.0.1.13", { method: "POST" })
+        .then(()=>{
+          // The real-time polling will pick up state changes
+          let step = 0;
+          const iv = setInterval(()=>{
+            setSimStep(step++);
+            if(step >= 5){ clearInterval(iv); setSimulating(false); setSimStep(-1); }
+          }, 1500);
+        })
+        .catch(()=>{ setSimulating(false); setSimStep(-1); });
+      return;
+    }
+
     const steps = [
       ()=>setState(s=>({...s,peers:{...s.peers,"10.0.1.13":{...s.peers["10.0.1.13"],state:"suspect"}}})),
       ()=>{ setState(s=>({...s,peers:{...s.peers,"10.0.1.13":{...s.peers["10.0.1.13"],state:"dead"}}}));
