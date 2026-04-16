@@ -3154,6 +3154,62 @@ def compare_hosts():
         "recommendation": "Cluster is balanced" if len(hosts) < 2 or abs(hosts[0]["cpu_pct"] - hosts[-1]["cpu_pct"]) < 20 else "Consider migrating VMs from overloaded host",
     }
 
+# ── System Diagnostics ────────────────────────────────────────────────────
+@app.get("/api/diagnostics", tags=["System"])
+def system_diagnostics():
+    """Run comprehensive system diagnostics and return results."""
+    diag = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checks": [],
+    }
+
+    # Check API health
+    diag["checks"].append({"name": "API Server", "status": "ok", "detail": f"Running on port 8080, version 2.0.0"})
+
+    # Check database
+    try:
+        with get_db() as db:
+            tables = db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            diag["checks"].append({"name": "Database", "status": "ok", "detail": f"{len(tables)} tables, SQLite"})
+    except Exception as e:
+        diag["checks"].append({"name": "Database", "status": "error", "detail": str(e)})
+
+    # Check disk space
+    disk = psutil.disk_usage("/")
+    status = "ok" if disk.percent < 80 else "warning" if disk.percent < 90 else "critical"
+    diag["checks"].append({"name": "Disk Space", "status": status, "detail": f"{disk.percent}% used, {disk.free // (1024**3)}GB free"})
+
+    # Check memory
+    mem = psutil.virtual_memory()
+    status = "ok" if mem.percent < 85 else "warning" if mem.percent < 95 else "critical"
+    diag["checks"].append({"name": "Memory", "status": status, "detail": f"{mem.percent}% used, {mem.available // (1024**2)}MB available"})
+
+    # Check AI
+    diag["checks"].append({"name": "AI Module", "status": "ok" if AI_AVAILABLE else "unavailable",
+                          "detail": "Ollama connected" if AI_AVAILABLE else "Ollama not reachable"})
+
+    # Check HA proxy
+    try:
+        import httpx
+        r = httpx.get(f"{HA_URL}/health", timeout=3)
+        diag["checks"].append({"name": "HA Engine", "status": "ok", "detail": f"Connected to {HA_URL}"})
+    except Exception:
+        diag["checks"].append({"name": "HA Engine", "status": "unavailable", "detail": f"Cannot reach {HA_URL}"})
+
+    # Check log file sizes
+    log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+    if os.path.isdir(log_dir):
+        total_log_size = sum(os.path.getsize(os.path.join(log_dir, f)) for f in os.listdir(log_dir) if f.endswith(".log"))
+        diag["checks"].append({"name": "Log Files", "status": "ok" if total_log_size < 50*1024*1024 else "warning",
+                              "detail": f"{total_log_size // (1024*1024)}MB total"})
+
+    ok = sum(1 for c in diag["checks"] if c["status"] == "ok")
+    total = len(diag["checks"])
+    diag["overall"] = "healthy" if ok == total else "degraded" if ok > total // 2 else "unhealthy"
+    diag["score"] = f"{ok}/{total} checks passed"
+
+    return diag
+
 # ── Serve frontend static files ──────────────────────────────────────────
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "ui", "dist")
 if os.path.isdir(FRONTEND_DIR):

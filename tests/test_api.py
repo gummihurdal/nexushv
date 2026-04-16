@@ -602,6 +602,17 @@ class TestEvents:
         assert r.status_code == 200
 
 
+class TestDiagnostics:
+    def test_diagnostics(self):
+        r = client.get("/api/diagnostics")
+        assert r.status_code == 200
+        data = r.json()
+        assert "checks" in data
+        assert "overall" in data
+        assert "score" in data
+        assert len(data["checks"]) >= 4
+
+
 class TestRequestID:
     def test_request_id_header(self):
         r = client.get("/health")
