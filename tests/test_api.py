@@ -392,6 +392,80 @@ class TestResize:
         assert r.status_code == 404
 
 
+class TestComplianceDashboard:
+    def test_compliance_dashboard(self):
+        r = client.get("/api/compliance/dashboard")
+        assert r.status_code == 200
+        data = r.json()
+        assert "compliance_score" in data
+        assert "grade" in data
+        assert "controls" in data
+        assert "frameworks_covered" in data
+        assert len(data["frameworks_covered"]) >= 4
+
+    def test_compliance_has_controls(self):
+        r = client.get("/api/compliance/dashboard")
+        data = r.json()
+        assert "access_control" in data["controls"]
+        assert "audit_trail" in data["controls"]
+        assert "encryption_transit" in data["controls"]
+
+
+class TestBackup:
+    def test_create_backup(self):
+        r = client.post("/api/backup/create", json={
+            "vm_name": "prod-db-primary", "destination": "/backup", "compress": True
+        })
+        assert r.status_code == 200
+        assert r.json()["status"] == "completed"
+
+    def test_list_backups(self):
+        r = client.get("/api/backup/list")
+        assert r.status_code == 200
+        assert "backups" in r.json()
+
+    def test_list_backups_filtered(self):
+        r = client.get("/api/backup/list?vm_name=prod-db-primary")
+        assert r.status_code == 200
+
+
+class TestResourceLimits:
+    def test_limits(self):
+        r = client.get("/api/limits")
+        assert r.status_code == 200
+        data = r.json()
+        assert "cpu" in data
+        assert "memory" in data
+        assert "allocated_vcpu" in data["cpu"]
+
+
+class TestPagination:
+    def test_paginated_list(self):
+        r = client.get("/api/paginated/vms?page=1&per_page=3")
+        assert r.status_code == 200
+        data = r.json()
+        assert "items" in data
+        assert "pagination" in data
+        assert data["pagination"]["per_page"] == 3
+
+    def test_paginated_page2(self):
+        r = client.get("/api/paginated/vms?page=2&per_page=3")
+        assert r.status_code == 200
+        assert r.json()["pagination"]["page"] == 2
+
+
+class TestInventoryExport:
+    def test_export(self):
+        r = client.get("/api/export/inventory")
+        assert r.status_code == 200
+        data = r.json()
+        assert "cluster" in data
+        assert "hosts" in data
+        assert "virtual_machines" in data
+        assert "totals" in data
+        assert data["totals"]["vms"] >= 1
+
+
 class TestAIAnalysis:
     def test_analyze_nonexistent_alert(self):
         r = client.post("/api/ai/analyze-alert?alert_id=99999")

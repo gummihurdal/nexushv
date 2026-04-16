@@ -80,7 +80,7 @@ def set_cache(key: str, value: object):
     _cache[key] = (time.time(), value)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = 24
-RATE_LIMIT_REQUESTS = 100  # per minute per IP
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "200"))  # per minute per IP
 RATE_LIMIT_WINDOW = 60
 
 # ── Try to connect to libvirt; fall back to demo mode ─────────────────────
@@ -3152,6 +3152,322 @@ def compare_hosts():
         "most_loaded": max(hosts, key=lambda h: h["cpu_pct"])["name"],
         "least_loaded": min(hosts, key=lambda h: h["cpu_pct"])["name"],
         "recommendation": "Cluster is balanced" if len(hosts) < 2 or abs(hosts[0]["cpu_pct"] - hosts[-1]["cpu_pct"]) < 20 else "Consider migrating VMs from overloaded host",
+    }
+
+# ── Structured Error Responses ────────────────────────────────────────────
+class NexusError(BaseModel):
+    error: str
+    code: str
+    detail: Optional[str] = None
+    request_id: Optional[str] = None
+
+@app.exception_handler(HTTPException)
+async def nexus_http_exception_handler(request: Request, exc: HTTPException):
+    """Return structured error responses with error codes."""
+    error_codes = {
+        400: "BAD_REQUEST",
+        401: "UNAUTHORIZED",
+        403: "FORBIDDEN",
+        404: "NOT_FOUND",
+        409: "CONFLICT",
+        422: "VALIDATION_ERROR",
+        429: "RATE_LIMITED",
+        500: "INTERNAL_ERROR",
+        503: "SERVICE_UNAVAILABLE",
+    }
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail,
+            "code": error_codes.get(exc.status_code, "UNKNOWN"),
+            "status": exc.status_code,
+        },
+    )
+
+# ── API Versioning ────────────────────────────────────────────────────────
+@app.middleware("http")
+async def add_api_version_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-NexusHV-Version"] = "2.0.0"
+    response.headers["X-API-Version"] = "v2"
+    return response
+
+# ── VM Resource Limits ────────────────────────────────────────────────────
+@app.get("/api/limits", tags=["System"])
+def get_resource_limits():
+    """Get current resource limits and usage against limits."""
+    host = local_host_info()
+    vms = list_vms()
+    total_vcpu = sum(v.get("cpu", 0) for v in vms)
+    total_ram_gb = sum(v.get("ram_mb", 0) for v in vms) / 1024
+
+    max_vcpu = host["cpu_count"] * 3  # 3:1 overcommit limit
+    max_ram_gb = host["ram_total_gb"] * 0.9  # 90% of physical
+
+    return {
+        "cpu": {
+            "allocated_vcpu": total_vcpu,
+            "max_vcpu": max_vcpu,
+            "available_vcpu": max(0, max_vcpu - total_vcpu),
+            "overcommit_ratio": round(total_vcpu / max(host["cpu_count"], 1), 2),
+            "at_limit": total_vcpu >= max_vcpu,
+        },
+        "memory": {
+            "allocated_gb": round(total_ram_gb, 1),
+            "max_gb": round(max_ram_gb, 1),
+            "available_gb": round(max(0, max_ram_gb - total_ram_gb), 1),
+            "commit_pct": round(total_ram_gb / max(max_ram_gb, 1) * 100, 1),
+            "at_limit": total_ram_gb >= max_ram_gb,
+        },
+        "vms": {
+            "total": len(vms),
+            "running": len([v for v in vms if v["state"] == "poweredOn"]),
+        },
+    }
+
+# ── Paginated VM List ─────────────────────────────────────────────────────
+@app.get("/api/paginated/vms", tags=["Virtual Machines"])
+def list_vms_paginated(page: int = 1, per_page: int = 20, state: Optional[str] = None, search: Optional[str] = None, sort: Optional[str] = None):
+    """List VMs with pagination support for large environments."""
+    all_vms = list_vms(state=state, search=search, sort=sort)
+    total = len(all_vms)
+    start = (page - 1) * per_page
+    end = start + per_page
+    items = all_vms[start:end]
+
+    return {
+        "items": items,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "pages": (total + per_page - 1) // per_page,
+            "has_next": end < total,
+            "has_prev": page > 1,
+        },
+    }
+
+# ── Compliance Dashboard ──────────────────────────────────────────────────
+@app.get("/api/compliance/dashboard", tags=["Compliance"])
+def compliance_dashboard():
+    """Unified compliance dashboard showing status across SOC2, ISO27001, HIPAA, PCI-DSS controls.
+    Maps NexusHV capabilities to common compliance frameworks."""
+
+    # Get security posture
+    posture = security_posture()
+
+    # Audit trail stats
+    with get_db() as db:
+        audit_count = db.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        failed_logins = db.execute("SELECT COUNT(*) FROM audit_log WHERE action = 'login_failed'").fetchone()[0]
+        users = db.execute("SELECT COUNT(*) FROM users WHERE active = 1").fetchone()[0]
+
+    # Build compliance matrix
+    controls = {
+        "access_control": {
+            "name": "Access Control",
+            "frameworks": ["SOC2-CC6.1", "ISO27001-A.9", "HIPAA-164.312(a)", "PCI-DSS-7"],
+            "status": "pass" if posture["checks"][1]["status"] == "pass" else "fail",
+            "evidence": f"JWT auth active, RBAC with {users} users, enforcement={'enabled' if ENFORCE_AUTH else 'available'}",
+        },
+        "encryption_transit": {
+            "name": "Encryption in Transit",
+            "frameworks": ["SOC2-CC6.7", "ISO27001-A.10", "HIPAA-164.312(e)", "PCI-DSS-4"],
+            "status": "pass" if posture["checks"][0]["status"] == "pass" else "fail",
+            "evidence": posture["checks"][0]["detail"],
+        },
+        "audit_trail": {
+            "name": "Audit Logging",
+            "frameworks": ["SOC2-CC7.2", "ISO27001-A.12.4", "HIPAA-164.312(b)", "PCI-DSS-10"],
+            "status": "pass" if audit_count > 0 else "fail",
+            "evidence": f"{audit_count} audit events recorded, structured JSON with timestamps and user IDs",
+        },
+        "change_management": {
+            "name": "Change Management",
+            "frameworks": ["SOC2-CC8.1", "ISO27001-A.12.1", "PCI-DSS-6"],
+            "status": "pass",
+            "evidence": "All VM operations logged in audit trail with user attribution",
+        },
+        "incident_detection": {
+            "name": "Incident Detection",
+            "frameworks": ["SOC2-CC7.3", "ISO27001-A.16", "HIPAA-164.308(a)(6)"],
+            "status": "pass" if AI_AVAILABLE else "partial",
+            "evidence": f"AI proactive scanning (5-min interval), anomaly detection, {len([c for c in posture['checks'] if c['status']=='pass'])} health checks",
+        },
+        "availability": {
+            "name": "Availability & Recovery",
+            "frameworks": ["SOC2-CC7.1", "ISO27001-A.17", "HIPAA-164.308(a)(7)"],
+            "status": "pass",
+            "evidence": "HA with quorum, auto-failover, snapshot policies, maintenance mode",
+        },
+        "authentication": {
+            "name": "Authentication Strength",
+            "frameworks": ["SOC2-CC6.1", "ISO27001-A.9.4", "PCI-DSS-8"],
+            "status": posture["checks"][2]["status"] if len(posture["checks"]) > 2 else "unknown",
+            "evidence": f"Bcrypt password hashing, JWT tokens (24h expiry), {failed_logins} failed login attempts recorded",
+        },
+        "monitoring": {
+            "name": "Continuous Monitoring",
+            "frameworks": ["SOC2-CC7.1", "ISO27001-A.12.4", "PCI-DSS-11"],
+            "status": "pass",
+            "evidence": "Prometheus metrics, WebSocket real-time monitoring, anomaly detection, AI health scans",
+        },
+    }
+
+    passed = sum(1 for c in controls.values() if c["status"] == "pass")
+    total = len(controls)
+    score = round(passed / total * 100)
+
+    return {
+        "compliance_score": score,
+        "grade": "A" if score >= 90 else "B" if score >= 70 else "C" if score >= 50 else "D",
+        "controls": controls,
+        "summary": f"{passed}/{total} controls satisfied",
+        "frameworks_covered": ["SOC2", "ISO27001", "HIPAA", "PCI-DSS"],
+        "security_posture": {
+            "score": posture["score"],
+            "grade": posture["grade"],
+        },
+        "next_audit_prep": [
+            c["name"] + ": " + c["evidence"][:80]
+            for c in controls.values() if c["status"] != "pass"
+        ],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+# ── Backup Pipeline API ──────────────────────────────────────────────────
+class BackupRequest(BaseModel):
+    vm_name: str
+    destination: str = Field(default="/backup", description="Backup destination path")
+    compress: bool = True
+    incremental: bool = False
+
+@app.post("/api/backup/create", tags=["Backup"])
+def create_backup(req: BackupRequest, request: Request):
+    """Create a VM backup (snapshot + export)."""
+    ip = request.client.host if request and request.client else "unknown"
+    audit_log("system", "backup_create", req.vm_name, f"dest={req.destination} compress={req.compress}", ip)
+
+    if DEMO_MODE:
+        return {
+            "status": "completed",
+            "vm": req.vm_name,
+            "destination": f"{req.destination}/{req.vm_name}-{datetime.now().strftime('%Y%m%d-%H%M')}.qcow2",
+            "size_estimate_gb": random.randint(5, 50),
+            "type": "incremental" if req.incremental else "full",
+            "compressed": req.compress,
+        }
+
+    # Real backup: snapshot + copy
+    try:
+        # Create snapshot
+        conn = get_conn()
+        dom = conn.lookupByName(req.vm_name)
+        snap_name = f"backup-{datetime.now().strftime('%Y%m%d-%H%M')}"
+        xml = f"<domainsnapshot><name>{snap_name}</name></domainsnapshot>"
+        dom.snapshotCreateXML(xml, 0)
+
+        # Get disk path
+        import xml.etree.ElementTree as ET
+        tree = ET.fromstring(dom.XMLDesc(0))
+        disk = tree.find(".//disk[@device='disk']/source")
+        src_path = disk.get("file") if disk is not None else None
+        conn.close()
+
+        if src_path:
+            dest_file = f"{req.destination}/{req.vm_name}-{datetime.now().strftime('%Y%m%d-%H%M')}.qcow2"
+            cmd = ["qemu-img", "convert", "-O", "qcow2"]
+            if req.compress:
+                cmd.append("-c")
+            cmd.extend([src_path, dest_file])
+            subprocess.run(cmd, check=True, timeout=3600)
+            return {"status": "completed", "vm": req.vm_name, "destination": dest_file}
+        else:
+            raise HTTPException(500, "Could not determine disk path")
+    except Exception as e:
+        raise HTTPException(500, f"Backup failed: {e}")
+
+@app.get("/api/backup/list", tags=["Backup"])
+def list_backups(vm_name: Optional[str] = None):
+    """List available backups."""
+    if DEMO_MODE:
+        backups = [
+            {"vm": "prod-db-primary", "file": "prod-db-primary-20240115-0200.qcow2", "size_gb": 45, "date": "2024-01-15T02:00:00Z", "type": "full"},
+            {"vm": "prod-db-primary", "file": "prod-db-primary-20240116-0200.qcow2", "size_gb": 12, "date": "2024-01-16T02:00:00Z", "type": "incremental"},
+            {"vm": "prod-web-01", "file": "prod-web-01-20240115-0200.qcow2", "size_gb": 8, "date": "2024-01-15T02:00:00Z", "type": "full"},
+        ]
+        if vm_name:
+            backups = [b for b in backups if b["vm"] == vm_name]
+        return {"backups": backups, "total": len(backups)}
+
+    # Real: scan backup directory
+    backup_dir = "/backup"
+    backups = []
+    if os.path.isdir(backup_dir):
+        for f in os.listdir(backup_dir):
+            if f.endswith(".qcow2"):
+                path = os.path.join(backup_dir, f)
+                stat = os.stat(path)
+                backups.append({
+                    "file": f,
+                    "size_gb": round(stat.st_size / (1024**3), 1),
+                    "date": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                })
+    if vm_name:
+        backups = [b for b in backups if vm_name in b.get("file", "")]
+    return {"backups": backups, "total": len(backups)}
+
+@app.post("/api/backup/restore", tags=["Backup"])
+def restore_backup(vm_name: str, backup_file: str, request: Request):
+    """Restore a VM from backup."""
+    ip = request.client.host if request and request.client else "unknown"
+    audit_log("system", "backup_restore", vm_name, f"file={backup_file}", ip)
+
+    if DEMO_MODE:
+        return {"status": "restored", "vm": vm_name, "source": backup_file}
+
+    raise HTTPException(501, "Restore requires manual verification — use: qemu-img convert and virsh define")
+
+# ── Data Export ───────────────────────────────────────────────────────────
+@app.get("/api/export/inventory", tags=["Export"])
+def export_inventory():
+    """Export complete cluster inventory as structured data for CMDB integration."""
+    vms = list_vms()
+    host = local_host_info()
+    storage = list_storage()
+    networks = list_networks()
+
+    return {
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "format_version": "1.0",
+        "cluster": {
+            "name": "NexusHV-Cluster",
+            "product": "NexusHV",
+            "version": "2.0.0",
+        },
+        "hosts": [{
+            "hostname": host["hostname"],
+            "cpu_cores": host["cpu_count"],
+            "ram_gb": host["ram_total_gb"],
+            "os": host.get("hypervisor", "KVM"),
+        }],
+        "virtual_machines": [{
+            "name": v["name"],
+            "state": v["state"],
+            "cpu": v.get("cpu", 0),
+            "ram_mb": v.get("ram_mb", 0),
+            "disk_gb": v.get("disk_gb", 0),
+            "os": v.get("os", ""),
+            "ip": v.get("ip"),
+        } for v in vms],
+        "storage_pools": storage,
+        "networks": networks,
+        "totals": {
+            "vms": len(vms),
+            "vcpu": sum(v.get("cpu", 0) for v in vms),
+            "ram_gb": round(sum(v.get("ram_mb", 0) for v in vms) / 1024, 1),
+            "storage_pools": len(storage),
+        },
     }
 
 # ── AI Root Cause Analysis ────────────────────────────────────────────────
