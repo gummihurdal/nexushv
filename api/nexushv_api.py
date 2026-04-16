@@ -3154,6 +3154,90 @@ def compare_hosts():
         "recommendation": "Cluster is balanced" if len(hosts) < 2 or abs(hosts[0]["cpu_pct"] - hosts[-1]["cpu_pct"]) < 20 else "Consider migrating VMs from overloaded host",
     }
 
+# ── Host Process List ─────────────────────────────────────────────────────
+@app.get("/api/hosts/local/processes", tags=["Hosts"])
+def host_processes(top_n: int = 20):
+    """List top host processes by CPU usage, including QEMU/VM processes."""
+    procs = []
+    for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent", "memory_info", "cmdline"]):
+        try:
+            info = p.info
+            if info["cpu_percent"] is not None and info["cpu_percent"] >= 0:
+                is_vm = "qemu" in (info["name"] or "").lower()
+                vm_name = None
+                if is_vm and info.get("cmdline"):
+                    for i, arg in enumerate(info["cmdline"]):
+                        if arg == "-name" and i + 1 < len(info["cmdline"]):
+                            vm_name = info["cmdline"][i + 1].split(",")[0].replace("guest=", "")
+                            break
+                procs.append({
+                    "pid": info["pid"],
+                    "name": info["name"],
+                    "cpu_pct": round(info["cpu_percent"], 1),
+                    "mem_pct": round(info["memory_percent"] or 0, 1),
+                    "mem_mb": round((info["memory_info"].rss if info["memory_info"] else 0) / (1024*1024)),
+                    "is_vm": is_vm,
+                    "vm_name": vm_name,
+                })
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    procs.sort(key=lambda p: p["cpu_pct"], reverse=True)
+    return {
+        "processes": procs[:min(top_n, 100)],
+        "total_processes": len(procs),
+        "vm_processes": len([p for p in procs if p["is_vm"]]),
+    }
+
+# ── VM Network Stats ─────────────────────────────────────────────────────
+@app.get("/api/vms/{name}/network", tags=["Virtual Machines"])
+def get_vm_network_stats(name: str):
+    """Get network interface statistics for a VM."""
+    if DEMO_MODE:
+        vm = next((v for v in _MOCK_VMS if v["name"] == name), None)
+        if not vm:
+            raise HTTPException(404, f"VM '{name}' not found")
+        net = _MOCK_NET_IO.get(name, {"rx_bytes": 0, "tx_bytes": 0})
+        return {
+            "vm": name,
+            "interfaces": [{
+                "name": "vnet0",
+                "mac": f"52:54:00:{hash(name) % 256:02x}:{hash(name+'a') % 256:02x}:{hash(name+'b') % 256:02x}",
+                "rx_bytes": net.get("rx_bytes", 0),
+                "tx_bytes": net.get("tx_bytes", 0),
+                "rx_mbps": round(random.uniform(0.5, 50), 1),
+                "tx_mbps": round(random.uniform(0.1, 20), 1),
+            }],
+        }
+    conn = get_conn()
+    try:
+        dom = conn.lookupByName(name)
+        import xml.etree.ElementTree as ET
+        tree = ET.fromstring(dom.XMLDesc(0))
+        interfaces = []
+        for iface in tree.findall(".//interface"):
+            target = iface.find("target")
+            mac = iface.find("mac")
+            dev = target.get("dev") if target is not None else None
+            if dev:
+                try:
+                    stats = dom.interfaceStats(dev)
+                    interfaces.append({
+                        "name": dev,
+                        "mac": mac.get("address") if mac is not None else None,
+                        "rx_bytes": stats[0],
+                        "rx_packets": stats[1],
+                        "tx_bytes": stats[4],
+                        "tx_packets": stats[5],
+                    })
+                except Exception:
+                    pass
+        return {"vm": name, "interfaces": interfaces}
+    except libvirt.libvirtError:
+        raise HTTPException(404, f"VM '{name}' not found")
+    finally:
+        conn.close()
+
 # ── VM Uptime Tracking ────────────────────────────────────────────────────
 @app.get("/api/vms/{name}/uptime", tags=["Virtual Machines"])
 def get_vm_uptime(name: str):

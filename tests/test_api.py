@@ -392,6 +392,60 @@ class TestResize:
         assert r.status_code == 404
 
 
+class TestHostProcesses:
+    def test_list_processes(self):
+        r = client.get("/api/hosts/local/processes?top_n=10")
+        assert r.status_code == 200
+        data = r.json()
+        assert "processes" in data
+        assert "total_processes" in data
+        assert len(data["processes"]) <= 10
+
+
+class TestVMNetwork:
+    def test_vm_network_stats(self):
+        r = client.get("/api/vms/prod-db-primary/network")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["vm"] == "prod-db-primary"
+        assert "interfaces" in data
+        assert len(data["interfaces"]) >= 1
+
+    def test_vm_network_not_found(self):
+        r = client.get("/api/vms/nonexistent/network")
+        assert r.status_code == 404
+
+
+class TestVMUptime:
+    def test_vm_uptime(self):
+        r = client.get("/api/vms/prod-db-primary/uptime")
+        assert r.status_code == 200
+        data = r.json()
+        assert "uptime_seconds" in data
+        assert "uptime_human" in data
+
+
+class TestClusterSummary:
+    def test_cluster_summary(self):
+        r = client.get("/api/cluster/summary")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] in ("healthy", "degraded")
+        assert "vms_running" in data
+
+
+class TestProbes:
+    def test_liveness(self):
+        r = client.get("/healthz")
+        assert r.status_code == 200
+        assert r.json()["status"] == "alive"
+
+    def test_readiness(self):
+        r = client.get("/readyz")
+        assert r.status_code == 200
+        assert r.json()["status"] == "ready"
+
+
 class TestVMImport:
     def test_import_vm(self):
         r = client.post("/api/vms/import", json={
