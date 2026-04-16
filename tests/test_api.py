@@ -366,3 +366,36 @@ class TestDashboard:
         assert "host" in data
         assert "resources" in data
         assert "alerts" in data
+
+
+class TestDRS:
+    def test_drs_recommendations(self):
+        r = client.get("/api/recommendations/drs")
+        assert r.status_code == 200
+        data = r.json()
+        assert "recommendations" in data
+        assert "cluster_balance" in data
+        assert "hosts" in data
+
+    def test_cluster_topology(self):
+        r = client.get("/api/topology")
+        assert r.status_code == 200
+        data = r.json()
+        assert "datacenter" in data
+        assert "clusters" in data
+        assert len(data["clusters"]) >= 1
+
+
+class TestHAProxy:
+    def test_ha_status(self):
+        r = client.get("/api/ha/status")
+        assert r.status_code == 200
+        # May return error if HA daemon not running
+
+    def test_ha_health(self):
+        r = client.get("/api/ha/health")
+        assert r.status_code == 200
+
+    def test_ha_events(self):
+        r = client.get("/api/ha/events")
+        assert r.status_code == 200

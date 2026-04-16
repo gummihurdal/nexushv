@@ -1607,6 +1607,126 @@ def rightsizing_recommendations():
         "analyzed_at": datetime.now(timezone.utc).isoformat(),
     }
 
+# ── DRS: Distributed Resource Scheduling ──────────────────────────────────
+@app.get("/api/recommendations/drs", tags=["Recommendations"])
+def drs_recommendations():
+    """DRS-style VM placement recommendations based on host load balancing.
+    Analyzes current VM placement and suggests migrations to balance load."""
+    if not DEMO_MODE:
+        return {"recommendations": [], "note": "DRS requires multi-host cluster"}
+
+    _mock_vm_tick()
+
+    # Simulate a 2-host cluster with imbalanced load
+    hosts = [
+        {"name": "esxi-prod-01", "ip": "10.0.1.10", "cpu_capacity": 64, "ram_gb": 256,
+         "cpu_used_pct": 72, "ram_used_pct": 69,
+         "vms": ["prod-db-primary", "prod-web-01", "win-rdp-01"]},
+        {"name": "esxi-prod-02", "ip": "10.0.1.11", "cpu_capacity": 64, "ram_gb": 256,
+         "cpu_used_pct": 28, "ram_used_pct": 40,
+         "vms": ["k8s-master-01", "k8s-worker-01", "backup-appliance"]},
+    ]
+
+    recommendations = []
+    imbalance_threshold = 20  # % difference triggers recommendation
+
+    # Calculate load imbalance
+    cpu_loads = [h["cpu_used_pct"] for h in hosts]
+    ram_loads = [h["ram_used_pct"] for h in hosts]
+    cpu_spread = max(cpu_loads) - min(cpu_loads)
+    ram_spread = max(ram_loads) - min(ram_loads)
+
+    if cpu_spread > imbalance_threshold:
+        # Find overloaded host and suggest migration
+        overloaded = max(hosts, key=lambda h: h["cpu_used_pct"])
+        underloaded = min(hosts, key=lambda h: h["cpu_used_pct"])
+
+        # Find a VM to migrate (prefer the lightest VM on the overloaded host)
+        vm_loads = {}
+        for vm in _MOCK_VMS:
+            if vm["name"] in overloaded["vms"] and vm["state"] == "poweredOn":
+                vm_loads[vm["name"]] = vm["cpu_pct"]
+
+        if vm_loads:
+            # Pick VM with moderate CPU (not the heaviest, as that would create new imbalance)
+            sorted_vms = sorted(vm_loads.items(), key=lambda x: x[1])
+            target_vm = sorted_vms[len(sorted_vms)//2][0] if len(sorted_vms) > 1 else sorted_vms[0][0]
+
+            recommendations.append({
+                "type": "vm_migration",
+                "priority": "HIGH" if cpu_spread > 40 else "MEDIUM",
+                "vm": target_vm,
+                "source_host": overloaded["name"],
+                "dest_host": underloaded["name"],
+                "reason": f"CPU imbalance: {overloaded['name']} at {overloaded['cpu_used_pct']}% vs {underloaded['name']} at {underloaded['cpu_used_pct']}%",
+                "expected_improvement": f"Reduces spread from {cpu_spread}% to ~{cpu_spread//2}%",
+                "command": f"virsh migrate --live {target_vm} qemu+ssh://{underloaded['ip']}/system",
+                "risk": "SAFE",
+                "downtime": "< 1ms (live migration)",
+            })
+
+    if ram_spread > imbalance_threshold:
+        overloaded = max(hosts, key=lambda h: h["ram_used_pct"])
+        underloaded = min(hosts, key=lambda h: h["ram_used_pct"])
+        recommendations.append({
+            "type": "memory_rebalance",
+            "priority": "MEDIUM",
+            "source_host": overloaded["name"],
+            "dest_host": underloaded["name"],
+            "reason": f"Memory imbalance: {overloaded['name']} at {overloaded['ram_used_pct']}% vs {underloaded['name']} at {underloaded['ram_used_pct']}%",
+            "expected_improvement": f"Reduces memory spread from {ram_spread}% to ~{ram_spread//2}%",
+            "risk": "SAFE",
+        })
+
+    return {
+        "recommendations": recommendations,
+        "cluster_balance": {
+            "cpu_spread_pct": cpu_spread,
+            "ram_spread_pct": ram_spread,
+            "cpu_balanced": cpu_spread <= imbalance_threshold,
+            "ram_balanced": ram_spread <= imbalance_threshold,
+        },
+        "hosts": hosts,
+        "analyzed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+# ── VM Topology/Placement ────────────────────────────────────────────────
+@app.get("/api/topology", tags=["Cluster"])
+def cluster_topology():
+    """Get cluster topology showing VM-to-host mapping and resource allocation."""
+    vms = list_vms()
+    host = local_host_info()
+    storage = list_storage()
+
+    # Build topology tree
+    clusters = [
+        {
+            "name": "Production-Cluster",
+            "ha_enabled": True,
+            "drs_enabled": True,
+            "hosts": [
+                {
+                    "name": host["hostname"],
+                    "ip": "127.0.0.1",
+                    "status": "connected",
+                    "cpu_count": host["cpu_count"],
+                    "ram_total_gb": host["ram_total_gb"],
+                    "cpu_pct": host["cpu_pct"],
+                    "ram_pct": host.get("ram_pct", 0),
+                    "vms": [{"name": v["name"], "state": v["state"], "cpu": v.get("cpu", 0), "ram_mb": v.get("ram_mb", 0)} for v in vms],
+                }
+            ],
+        }
+    ]
+
+    return {
+        "datacenter": "NexusHV-DC-01",
+        "clusters": clusters,
+        "storage_pools": storage,
+        "total_vms": len(vms),
+        "total_hosts": 1,
+    }
+
 # ── Cluster Overview Dashboard Data ──────────────────────────────────────
 @app.get("/api/dashboard/overview", tags=["Dashboard"])
 def dashboard_overview():
