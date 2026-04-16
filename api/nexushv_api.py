@@ -567,7 +567,7 @@ async def acknowledge_alert(alert_id: int, user: TokenData = Depends(require_aut
     return {"status": "acknowledged", "alert_id": alert_id}
 
 def create_alert(severity: str, component: str, title: str, detail: str = ""):
-    """Create a new alert in the database."""
+    """Create a new alert in the database and broadcast to WebSocket clients."""
     try:
         with get_db() as db:
             db.execute(
@@ -575,6 +575,13 @@ def create_alert(severity: str, component: str, title: str, detail: str = ""):
                 (severity, component, title, detail)
             )
         log.warning(f"ALERT [{severity}] {component}: {title}")
+        # Broadcast to WebSocket subscribers (non-blocking)
+        try:
+            asyncio.get_event_loop().create_task(broadcast_event("alert", {
+                "severity": severity, "component": component, "title": title, "detail": detail[:200],
+            }))
+        except RuntimeError:
+            pass  # No event loop yet during startup
     except Exception as e:
         log.error(f"Failed to create alert: {e}")
 
@@ -2002,6 +2009,41 @@ def get_vm_metrics_history(vm_name: str, metric: str = "vm_cpu", hours: int = 24
             (metric, vm_name, f"-{min(hours, 168)} hours")
         ).fetchall()
         return [{"ts": r["ts"], "value": r["value"]} for r in rows]
+
+# ── Real-Time Event WebSocket ─────────────────────────────────────────────
+_event_subscribers: list[WebSocket] = []
+
+@app.websocket("/ws/events")
+async def event_stream_ws(websocket: WebSocket):
+    """Real-time event stream for the UI — pushes alerts, VM state changes, HA events."""
+    await websocket.accept()
+    _event_subscribers.append(websocket)
+    try:
+        while True:
+            # Keep-alive + receive any client messages
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=30)
+            except asyncio.TimeoutError:
+                # Send keepalive
+                await websocket.send_text(json.dumps({"type": "keepalive", "ts": time.time()}))
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        if websocket in _event_subscribers:
+            _event_subscribers.remove(websocket)
+
+async def broadcast_event(event_type: str, data: dict):
+    """Broadcast an event to all connected WebSocket clients."""
+    msg = json.dumps({"type": event_type, "ts": time.time(), "data": data})
+    dead = []
+    for ws in _event_subscribers:
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        if ws in _event_subscribers:
+            _event_subscribers.remove(ws)
 
 # ── noVNC WebSocket Proxy Info ────────────────────────────────────────────
 @app.get("/api/vms/{name}/console/websocket", tags=["Virtual Machines"])
