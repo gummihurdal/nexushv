@@ -1794,6 +1794,38 @@ def rightsizing_recommendations():
         "analyzed_at": datetime.now(timezone.utc).isoformat(),
     }
 
+# ── VM Resource Summary ───────────────────────────────────────────────────
+@app.get("/api/vms/summary/resources", tags=["Virtual Machines"])
+def vm_resource_summary():
+    """Aggregated resource usage summary across all VMs."""
+    vms = list_vms()
+    on = [v for v in vms if v["state"] == "poweredOn"]
+    off = [v for v in vms if v["state"] == "poweredOff"]
+
+    return {
+        "total_vms": len(vms),
+        "running": len(on),
+        "stopped": len(off),
+        "suspended": len(vms) - len(on) - len(off),
+        "resources": {
+            "total_vcpu": sum(v.get("cpu", 0) for v in vms),
+            "running_vcpu": sum(v.get("cpu", 0) for v in on),
+            "total_ram_gb": round(sum(v.get("ram_mb", 0) for v in vms) / 1024, 1),
+            "running_ram_gb": round(sum(v.get("ram_mb", 0) for v in on) / 1024, 1),
+            "total_disk_gb": sum(v.get("disk_gb", 0) for v in vms),
+        },
+        "avg_cpu_pct": round(sum(v.get("cpu_pct", 0) for v in on) / max(len(on), 1), 1),
+        "avg_ram_pct": round(sum(v.get("ram_used_pct", 0) for v in on) / max(len(on), 1), 1),
+        "top_cpu_vms": sorted(
+            [{"name": v["name"], "cpu_pct": v.get("cpu_pct", 0)} for v in on],
+            key=lambda x: x["cpu_pct"], reverse=True
+        )[:5],
+        "top_ram_vms": sorted(
+            [{"name": v["name"], "ram_pct": v.get("ram_used_pct", 0)} for v in on],
+            key=lambda x: x["ram_pct"], reverse=True
+        )[:5],
+    }
+
 # ── Resource Planning ─────────────────────────────────────────────────────
 @app.get("/api/planning/capacity", tags=["Planning"])
 def capacity_planning():
