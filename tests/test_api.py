@@ -392,6 +392,46 @@ class TestResize:
         assert r.status_code == 404
 
 
+class TestRemediation:
+    def test_remediate_with_issue(self):
+        r = client.post("/api/ai/remediate", json={
+            "issue": "Host CPU at 95%, what should I do?",
+            "auto_execute": False,
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert "remediation" in data
+
+
+class TestFederation:
+    def test_list_clusters(self):
+        r = client.get("/api/federation/clusters")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_register_cluster(self):
+        r = client.post("/api/federation/clusters?name=dc2&url=http://10.1.1.10:8080")
+        assert r.status_code == 200
+        assert r.json()["status"] == "registered"
+
+    def test_federation_overview(self):
+        r = client.get("/api/federation/overview")
+        assert r.status_code == 200
+        data = r.json()
+        assert "clusters" in data
+        assert "total_vms" in data
+        assert data["total_clusters"] >= 1
+
+
+class TestGPU:
+    def test_list_gpus(self):
+        r = client.get("/api/hosts/local/gpus")
+        assert r.status_code == 200
+        data = r.json()
+        assert "gpus" in data
+        assert "total" in data
+
+
 class TestComplianceDashboard:
     def test_compliance_dashboard(self):
         r = client.get("/api/compliance/dashboard")

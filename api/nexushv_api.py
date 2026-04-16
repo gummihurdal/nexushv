@@ -3335,6 +3335,197 @@ def compliance_dashboard():
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
+# ── AI Autonomous Remediation ─────────────────────────────────────────────
+class RemediationRequest(BaseModel):
+    alert_id: Optional[int] = None
+    issue: Optional[str] = None
+    auto_execute: bool = False  # If True, execute safe remediations automatically
+
+@app.post("/api/ai/remediate", tags=["NEXUS AI"])
+async def ai_remediate(req: RemediationRequest, request: Request):
+    """AI-powered remediation: analyze issue, suggest fix, optionally execute safe commands."""
+    ip = request.client.host if request and request.client else "unknown"
+
+    if not AI_AVAILABLE:
+        return {"error": "AI not available"}
+
+    # Build context
+    ctx = await _build_cluster_context()
+    issue_desc = req.issue or ""
+
+    if req.alert_id:
+        with get_db() as db:
+            alert = db.execute("SELECT * FROM alerts WHERE id = ?", (req.alert_id,)).fetchone()
+            if alert:
+                issue_desc = f"[{alert['severity']}] {alert['title']}: {alert['detail']}"
+
+    prompt = f"""Analyze this issue and provide remediation:
+
+Issue: {issue_desc}
+
+{ctx.to_prompt_string()}
+
+Respond with JSON:
+{{
+  "diagnosis": "What is happening and why",
+  "severity": "CRITICAL" | "WARNING" | "INFO",
+  "safe_commands": ["list of safe read-only diagnostic commands to run"],
+  "fix_commands": ["list of commands that would fix the issue"],
+  "fix_risk": "SAFE" | "REQUIRES_DOWNTIME" | "DATA_LOSS_RISK",
+  "explanation": "Why these commands fix the issue",
+  "monitoring": "What to check after the fix"
+}}
+
+Return ONLY JSON."""
+
+    response = await ai.chat(prompt)
+
+    # Try to parse AI response as JSON
+    remediation = {"raw_response": response}
+    try:
+        clean = response.strip()
+        if clean.startswith("```"):
+            clean = clean.split("```")[1]
+            if clean.startswith("json"):
+                clean = clean[4:]
+        start = clean.find("{")
+        end = clean.rfind("}") + 1
+        if start >= 0 and end > start:
+            remediation = json.loads(clean[start:end])
+    except json.JSONDecodeError:
+        pass
+
+    # Execute safe diagnostic commands if requested
+    executed_results = []
+    if req.auto_execute and "safe_commands" in remediation:
+        for cmd in remediation.get("safe_commands", [])[:5]:
+            result = await ai.execute_command(cmd)
+            executed_results.append(result)
+
+    audit_log("ai", "remediate", issue_desc[:100], f"auto_execute={req.auto_execute}", ip)
+
+    return {
+        "issue": issue_desc,
+        "remediation": remediation,
+        "auto_executed": executed_results if req.auto_execute else [],
+        "note": "Fix commands require manual approval unless auto_execute=true and commands are in safe list",
+    }
+
+# ── Multi-Cluster Federation API ─────────────────────────────────────────
+# Stores registered remote clusters
+@app.get("/api/federation/clusters", tags=["Federation"])
+def list_federated_clusters():
+    """List all federated NexusHV clusters."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'federation_clusters'").fetchone()
+        return json.loads(row["value"]) if row else []
+
+@app.post("/api/federation/clusters", tags=["Federation"])
+def register_federated_cluster(name: str, url: str, token: Optional[str] = None):
+    """Register a remote NexusHV cluster for federation."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'federation_clusters'").fetchone()
+        clusters = json.loads(row["value"]) if row else []
+        clusters.append({
+            "name": name,
+            "url": url,
+            "registered_at": datetime.now(timezone.utc).isoformat(),
+            "status": "registered",
+        })
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('federation_clusters', ?)", (json.dumps(clusters),))
+    return {"status": "registered", "name": name, "url": url}
+
+@app.get("/api/federation/overview", tags=["Federation"])
+async def federation_overview():
+    """Get aggregated overview across all federated clusters."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'federation_clusters'").fetchone()
+        clusters = json.loads(row["value"]) if row else []
+
+    results = []
+    # Local cluster
+    local = {
+        "name": "local",
+        "url": "http://localhost:8080",
+        "status": "connected",
+        "data": None,
+    }
+    try:
+        local["data"] = dashboard_overview()
+    except Exception:
+        local["status"] = "error"
+    results.append(local)
+
+    # Remote clusters
+    for cluster in clusters:
+        entry = {"name": cluster["name"], "url": cluster["url"], "status": "unknown", "data": None}
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(f"{cluster['url']}/api/dashboard/overview")
+                entry["data"] = r.json()
+                entry["status"] = "connected"
+        except Exception:
+            entry["status"] = "unreachable"
+        results.append(entry)
+
+    total_vms = sum(c["data"]["vms"]["total"] for c in results if c["data"])
+    running_vms = sum(c["data"]["vms"]["on"] for c in results if c["data"])
+
+    return {
+        "clusters": results,
+        "total_clusters": len(results),
+        "connected_clusters": len([c for c in results if c["status"] == "connected"]),
+        "total_vms": total_vms,
+        "running_vms": running_vms,
+    }
+
+# ── GPU Management API ────────────────────────────────────────────────────
+@app.get("/api/hosts/local/gpus", tags=["Hosts"])
+def list_host_gpus():
+    """List GPUs available on the host for passthrough or vGPU."""
+    gpus = []
+
+    # Try nvidia-smi
+    try:
+        result = subprocess.run(["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu",
+                                "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            for line in result.stdout.strip().split("\n"):
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 6:
+                    gpus.append({
+                        "index": int(parts[0]),
+                        "name": parts[1],
+                        "memory_total_mb": int(parts[2]),
+                        "memory_used_mb": int(parts[3]),
+                        "utilization_pct": int(parts[4]),
+                        "temperature_c": int(parts[5]),
+                        "vendor": "NVIDIA",
+                    })
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Try lspci for any GPU
+    if not gpus:
+        try:
+            result = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split("\n"):
+                if "VGA" in line or "3D controller" in line or "Display" in line:
+                    gpus.append({
+                        "name": line.split(": ", 1)[1] if ": " in line else line,
+                        "pci_address": line.split(" ")[0],
+                        "vendor": "NVIDIA" if "NVIDIA" in line else "AMD" if "AMD" in line else "Intel" if "Intel" in line else "Unknown",
+                    })
+        except Exception:
+            pass
+
+    return {
+        "gpus": gpus,
+        "total": len(gpus),
+        "nvidia_available": any(g.get("vendor") == "NVIDIA" for g in gpus),
+        "passthrough_possible": len(gpus) > 0,
+    }
+
 # ── Backup Pipeline API ──────────────────────────────────────────────────
 class BackupRequest(BaseModel):
     vm_name: str
