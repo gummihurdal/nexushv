@@ -2189,6 +2189,56 @@ def dashboard_overview():
         "demo_mode": DEMO_MODE,
     }
 
+# ── User Activity Dashboard ───────────────────────────────────────────────
+@app.get("/api/activity/summary", tags=["Activity"])
+def activity_summary(hours: int = 24):
+    """Get activity summary for the specified time period."""
+    with get_db() as db:
+        total_actions = db.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE ts > datetime('now', ?)",
+            (f"-{min(hours, 168)} hours",)
+        ).fetchone()[0]
+
+        top_actions = db.execute(
+            "SELECT action, COUNT(*) as cnt FROM audit_log WHERE ts > datetime('now', ?) GROUP BY action ORDER BY cnt DESC LIMIT 10",
+            (f"-{min(hours, 168)} hours",)
+        ).fetchall()
+
+        top_users = db.execute(
+            "SELECT user, COUNT(*) as cnt FROM audit_log WHERE ts > datetime('now', ?) AND user IS NOT NULL GROUP BY user ORDER BY cnt DESC LIMIT 10",
+            (f"-{min(hours, 168)} hours",)
+        ).fetchall()
+
+        alert_counts = db.execute(
+            "SELECT severity, COUNT(*) as cnt FROM alerts WHERE ts > datetime('now', ?) GROUP BY severity",
+            (f"-{min(hours, 168)} hours",)
+        ).fetchall()
+
+    return {
+        "period_hours": hours,
+        "total_actions": total_actions,
+        "top_actions": [{"action": r["action"], "count": r["cnt"]} for r in top_actions],
+        "top_users": [{"user": r["user"], "count": r["cnt"]} for r in top_users],
+        "alert_summary": {r["severity"]: r["cnt"] for r in alert_counts},
+    }
+
+# ── VM Lifecycle Timeline ────────────────────────────────────────────────
+@app.get("/api/vms/{name}/timeline", tags=["Virtual Machines"])
+def vm_timeline(name: str, limit: int = 50):
+    """Get lifecycle event timeline for a specific VM."""
+    with get_db() as db:
+        events = db.execute(
+            "SELECT * FROM audit_log WHERE resource = ? OR detail LIKE ? ORDER BY ts DESC LIMIT ?",
+            (name, f"%{name}%", min(limit, 200))
+        ).fetchall()
+    return [{
+        "timestamp": e["ts"],
+        "action": e["action"],
+        "user": e["user"],
+        "detail": e["detail"],
+        "success": bool(e["success"]),
+    } for e in events]
+
 # ── Global Search ─────────────────────────────────────────────────────────
 @app.get("/api/search", tags=["System"])
 def global_search(q: str):
