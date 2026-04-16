@@ -2189,6 +2189,49 @@ def dashboard_overview():
         "demo_mode": DEMO_MODE,
     }
 
+# ── Global Search ─────────────────────────────────────────────────────────
+@app.get("/api/search", tags=["System"])
+def global_search(q: str):
+    """Search across VMs, storage, networks, alerts, and events."""
+    if not q or len(q) < 2:
+        return {"results": [], "query": q}
+
+    q_lower = q.lower()
+    results = []
+
+    # Search VMs
+    vms = list_vms()
+    for vm in vms:
+        if q_lower in vm["name"].lower() or q_lower in vm.get("os", "").lower():
+            results.append({"type": "vm", "name": vm["name"], "state": vm["state"],
+                          "detail": f"{vm.get('cpu',0)}vCPU, {vm.get('ram_mb',0)}MB RAM"})
+
+    # Search storage
+    storage = list_storage()
+    for s in storage:
+        if q_lower in s["name"].lower():
+            results.append({"type": "storage", "name": s["name"],
+                          "detail": f"{s.get('free_gb',0)}GB free"})
+
+    # Search networks
+    networks = list_networks()
+    for n in networks:
+        if q_lower in n["name"].lower():
+            results.append({"type": "network", "name": n["name"],
+                          "detail": n.get("bridge", "")})
+
+    # Search alerts
+    with get_db() as db:
+        alerts = db.execute(
+            "SELECT * FROM alerts WHERE title LIKE ? OR component LIKE ? ORDER BY ts DESC LIMIT 10",
+            (f"%{q}%", f"%{q}%")
+        ).fetchall()
+        for a in alerts:
+            results.append({"type": "alert", "name": a["title"],
+                          "detail": f"[{a['severity']}] {a['component']}"})
+
+    return {"results": results, "query": q, "count": len(results)}
+
 # ── System Events API ─────────────────────────────────────────────────────
 @app.get("/api/events", tags=["Events"])
 def get_system_events(limit: int = 50, event_type: Optional[str] = None):
