@@ -587,11 +587,27 @@ def create_alert(severity: str, component: str, title: str, detail: str = ""):
 
 # ── Routes: Virtual Machines ──────────────────────────────────────────────
 @app.get("/api/vms", tags=["Virtual Machines"])
-def list_vms():
-    """List all virtual machines with their current state."""
+def list_vms(state: Optional[str] = None, search: Optional[str] = None, sort: Optional[str] = None):
+    """List all virtual machines with optional filtering and sorting.
+
+    - state: filter by state (poweredOn, poweredOff, suspended)
+    - search: filter by name (case-insensitive substring match)
+    - sort: sort by field (name, cpu_pct, ram_used_pct, state)
+    """
     if DEMO_MODE:
         _mock_vm_tick()
-        return _MOCK_VMS
+        vms = _MOCK_VMS
+        if state:
+            vms = [v for v in vms if v["state"] == state]
+        if search:
+            search_lower = search.lower()
+            vms = [v for v in vms if search_lower in v["name"].lower() or search_lower in v.get("os", "").lower()]
+        if sort:
+            reverse = sort.startswith("-")
+            field = sort.lstrip("-")
+            if field in ("name", "cpu_pct", "ram_used_pct", "state", "cpu", "ram_mb"):
+                vms = sorted(vms, key=lambda v: v.get(field, 0), reverse=reverse)
+        return vms
     conn = get_conn()
     try:
         return [vm_info(d) for d in conn.listAllDomains()]

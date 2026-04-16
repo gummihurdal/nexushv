@@ -93,6 +93,24 @@ class TestVMs:
         assert "name" in vms[0]
         assert "state" in vms[0]
 
+    def test_list_vms_filter_state(self):
+        r = client.get("/api/vms?state=poweredOn")
+        assert r.status_code == 200
+        vms = r.json()
+        assert all(v["state"] == "poweredOn" for v in vms)
+
+    def test_list_vms_search(self):
+        r = client.get("/api/vms?search=prod")
+        assert r.status_code == 200
+        vms = r.json()
+        assert all("prod" in v["name"].lower() for v in vms)
+
+    def test_list_vms_sort(self):
+        r = client.get("/api/vms?sort=-cpu_pct")
+        assert r.status_code == 200
+        vms = r.json()
+        assert len(vms) >= 2
+
     def test_get_vm(self):
         r = client.get("/api/vms/prod-db-primary")
         assert r.status_code == 200
