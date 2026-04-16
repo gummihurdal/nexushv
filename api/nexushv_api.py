@@ -316,7 +316,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Middleware: rate limiting, metrics, logging ────────────────────────────
+# ── RBAC Enforcement Mode ─────────────────────────────────────────────────
+ENFORCE_AUTH = os.getenv("NEXUSHV_ENFORCE_AUTH", "false").lower() in ("true", "1", "yes")
+# When ENFORCE_AUTH is True, write operations (POST/PUT/DELETE) require valid JWT
+# Write-exempt paths (login, health) are always accessible
+AUTH_EXEMPT_PATHS = {"/api/auth/login", "/health", "/api/mode", "/api/info", "/metrics"}
+
+# ── Middleware: rate limiting, metrics, auth enforcement, logging ─────────
 @app.middleware("http")
 async def api_middleware(request: Request, call_next):
     start = time.time()
@@ -326,6 +332,25 @@ async def api_middleware(request: Request, call_next):
     if not check_rate_limit(ip):
         log.warning(f"Rate limit exceeded for {ip}")
         return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+
+    # RBAC enforcement for write operations
+    if ENFORCE_AUTH and request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        path = request.url.path
+        if path not in AUTH_EXEMPT_PATHS and not path.startswith("/ws/"):
+            auth_header = request.headers.get("authorization", "")
+            if not auth_header.startswith("Bearer "):
+                return JSONResponse(status_code=401, content={
+                    "detail": "Authentication required for write operations",
+                    "hint": "POST /api/auth/login to get a token, then include Authorization: Bearer <token>"
+                })
+            try:
+                token = auth_header.split(" ", 1)[1]
+                user = decode_token(token)
+                # Check role for destructive operations
+                if request.method == "DELETE" and user.role not in ("admin", "operator"):
+                    return JSONResponse(status_code=403, content={"detail": f"Role '{user.role}' cannot perform delete operations"})
+            except HTTPException:
+                return JSONResponse(status_code=401, content={"detail": "Invalid or expired token"})
 
     try:
         response = await call_next(request)
@@ -341,9 +366,13 @@ async def api_middleware(request: Request, call_next):
         REQUEST_COUNT.labels(request.method, endpoint, response.status_code).inc()
         REQUEST_LATENCY.labels(request.method, endpoint).observe(duration)
 
+    # Add request ID header for tracing
+    request_id = f"{int(time.time()*1000)}-{secrets.token_hex(4)}"
+    response.headers["X-Request-ID"] = request_id
+
     # Access logging for non-static requests
     if not request.url.path.startswith("/assets"):
-        log.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s [{ip}]")
+        log.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s [{ip}] req={request_id}")
 
     return response
 

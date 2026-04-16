@@ -452,11 +452,24 @@ class TestEvents:
         assert r.status_code == 200
 
 
+class TestRequestID:
+    def test_request_id_header(self):
+        r = client.get("/health")
+        assert "x-request-id" in r.headers
+        assert len(r.headers["x-request-id"]) > 10
+
+
 class TestPrometheus:
     def test_prometheus_metrics(self):
         r = client.get("/metrics")
         assert r.status_code == 200
         assert b"nexushv_" in r.content
+
+    def test_prometheus_contains_key_metrics(self):
+        r = client.get("/metrics")
+        content = r.content.decode()
+        assert "nexushv_api_requests_total" in content
+        assert "nexushv_host_cpu_percent" in content
 
 
 class TestWebhooks:
