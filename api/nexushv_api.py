@@ -1794,6 +1794,65 @@ def rightsizing_recommendations():
         "analyzed_at": datetime.now(timezone.utc).isoformat(),
     }
 
+# ── Resource Planning ─────────────────────────────────────────────────────
+@app.get("/api/planning/capacity", tags=["Planning"])
+def capacity_planning():
+    """Capacity planning report showing resource utilization and growth trends."""
+    vms = list_vms()
+    host = local_host_info()
+
+    on_vms = [v for v in vms if v["state"] == "poweredOn"]
+    total_vcpu = sum(v.get("cpu", 0) for v in vms)
+    total_ram_mb = sum(v.get("ram_mb", 0) for v in vms)
+    host_cores = host.get("cpu_count", 1)
+    host_ram_gb = host.get("ram_total_gb", 1)
+
+    vcpu_ratio = round(total_vcpu / max(host_cores, 1), 2)
+    ram_commit_pct = round(total_ram_mb / (host_ram_gb * 1024) * 100, 1)
+
+    # Estimate headroom
+    remaining_vcpu = max(0, host_cores * 3 - total_vcpu)  # 3:1 overcommit limit
+    remaining_ram_gb = max(0, host_ram_gb * 0.85 - total_ram_mb / 1024)  # 85% limit
+
+    # How many more "average" VMs can fit
+    avg_vm_cpu = total_vcpu / max(len(vms), 1)
+    avg_vm_ram_mb = total_ram_mb / max(len(vms), 1)
+    possible_new_vms_cpu = int(remaining_vcpu / max(avg_vm_cpu, 1))
+    possible_new_vms_ram = int(remaining_ram_gb * 1024 / max(avg_vm_ram_mb, 1))
+    possible_new_vms = min(possible_new_vms_cpu, possible_new_vms_ram)
+
+    return {
+        "host": {
+            "cpu_cores": host_cores,
+            "ram_gb": host_ram_gb,
+            "cpu_pct": host.get("cpu_pct", 0),
+            "ram_pct": host.get("ram_pct", 0),
+        },
+        "allocation": {
+            "total_vcpu": total_vcpu,
+            "total_ram_gb": round(total_ram_mb / 1024, 1),
+            "vcpu_overcommit_ratio": vcpu_ratio,
+            "ram_commit_pct": ram_commit_pct,
+        },
+        "headroom": {
+            "remaining_vcpu": remaining_vcpu,
+            "remaining_ram_gb": round(remaining_ram_gb, 1),
+            "possible_new_vms": possible_new_vms,
+            "vcpu_ratio_ok": vcpu_ratio <= 3.0,
+            "ram_ok": ram_commit_pct <= 85,
+        },
+        "warnings": [
+            w for w in [
+                f"vCPU overcommit ratio {vcpu_ratio}:1 (max recommended: 3:1)" if vcpu_ratio > 3 else None,
+                f"RAM commitment at {ram_commit_pct}% (max recommended: 85%)" if ram_commit_pct > 85 else None,
+                f"Host CPU at {host.get('cpu_pct', 0)}% — approaching capacity" if host.get("cpu_pct", 0) > 80 else None,
+            ] if w
+        ],
+        "total_vms": len(vms),
+        "running_vms": len(on_vms),
+        "analyzed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
 # ── DRS: Distributed Resource Scheduling ──────────────────────────────────
 @app.get("/api/recommendations/drs", tags=["Recommendations"])
 def drs_recommendations():

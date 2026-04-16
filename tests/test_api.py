@@ -436,6 +436,17 @@ class TestDashboard:
         assert "alerts" in data
 
 
+class TestCapacityPlanning:
+    def test_capacity_planning(self):
+        r = client.get("/api/planning/capacity")
+        assert r.status_code == 200
+        data = r.json()
+        assert "host" in data
+        assert "allocation" in data
+        assert "headroom" in data
+        assert data["total_vms"] >= 1
+
+
 class TestDRS:
     def test_drs_recommendations(self):
         r = client.get("/api/recommendations/drs")
