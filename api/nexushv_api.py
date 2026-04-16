@@ -2782,6 +2782,113 @@ def security_posture():
         "recommendations": [c["detail"] for c in checks if c["status"] in ("fail", "warn")],
     }
 
+# ── VM Performance Comparison ─────────────────────────────────────────────
+@app.get("/api/compare/vms", tags=["Virtual Machines"])
+def compare_vms(names: str):
+    """Compare resource usage across multiple VMs side-by-side.
+    Pass comma-separated VM names: ?names=prod-db-primary,prod-web-01"""
+    vm_names = [n.strip() for n in names.split(",") if n.strip()]
+    if not vm_names:
+        raise HTTPException(400, "Provide comma-separated VM names in 'names' parameter")
+
+    vms = list_vms()
+    results = []
+    for name in vm_names:
+        vm = next((v for v in vms if v["name"] == name), None)
+        if vm:
+            results.append({
+                "name": vm["name"],
+                "state": vm["state"],
+                "cpu": vm.get("cpu", 0),
+                "cpu_pct": vm.get("cpu_pct", 0),
+                "ram_gb": round(vm.get("ram_mb", 0) / 1024, 1),
+                "ram_pct": vm.get("ram_used_pct", 0),
+                "disk_gb": vm.get("disk_gb", 0),
+                "efficiency": round(vm.get("cpu_pct", 0) / max(vm.get("cpu", 1), 1), 1),
+            })
+
+    if len(results) >= 2:
+        most_efficient = max(results, key=lambda r: r["efficiency"])
+        least_efficient = min(results, key=lambda r: r["efficiency"])
+    else:
+        most_efficient = least_efficient = results[0] if results else None
+
+    return {
+        "vms": results,
+        "most_efficient": most_efficient["name"] if most_efficient else None,
+        "least_efficient": least_efficient["name"] if least_efficient else None,
+    }
+
+# ── Compliance Audit Export ───────────────────────────────────────────────
+@app.get("/api/compliance/audit-export", tags=["Compliance"])
+def export_audit_for_compliance(hours: int = 720, format: str = "json"):
+    """Export audit log for compliance review (default: last 30 days)."""
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT * FROM audit_log WHERE ts > datetime('now', ?) ORDER BY ts",
+            (f"-{min(hours, 8760)} hours",)
+        ).fetchall()
+
+    entries = [{
+        "timestamp": r["ts"],
+        "user": r["user"] or "system",
+        "action": r["action"],
+        "resource": r["resource"],
+        "detail": r["detail"],
+        "source_ip": r["ip"],
+        "success": bool(r["success"]),
+    } for r in rows]
+
+    # Security posture at time of export
+    posture = security_posture()
+
+    return {
+        "export_info": {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "period_hours": hours,
+            "total_entries": len(entries),
+            "product": "NexusHV",
+            "version": "2.0.0",
+        },
+        "security_posture": {
+            "score": posture["score"],
+            "grade": posture["grade"],
+            "checks": posture["checks"],
+        },
+        "audit_entries": entries,
+        "summary": {
+            "unique_users": len(set(e["user"] for e in entries)),
+            "actions_by_type": {},
+            "failed_actions": sum(1 for e in entries if not e["success"]),
+        },
+    }
+
+# ── VM Tag Management ─────────────────────────────────────────────────────
+@app.get("/api/tags", tags=["Tags"])
+def list_all_tags():
+    """List all unique tags across all VMs for filtering and organization."""
+    with get_db() as db:
+        rows = db.execute("SELECT tags FROM vm_notes WHERE tags IS NOT NULL AND tags != ''").fetchall()
+
+    all_tags = set()
+    for r in rows:
+        for tag in r["tags"].split(","):
+            tag = tag.strip()
+            if tag:
+                all_tags.add(tag)
+
+    return {"tags": sorted(all_tags), "count": len(all_tags)}
+
+@app.get("/api/tags/{tag}/vms", tags=["Tags"])
+def get_vms_by_tag(tag: str):
+    """Get all VMs with a specific tag."""
+    with get_db() as db:
+        rows = db.execute("SELECT vm_name FROM vm_notes WHERE tags LIKE ?", (f"%{tag}%",)).fetchall()
+
+    vm_names = [r["vm_name"] for r in rows]
+    vms = list_vms()
+    return [v for v in vms if v["name"] in vm_names]
+
 # ── AI Anomaly Detection ─────────────────────────────────────────────────
 @app.get("/api/anomalies", tags=["Monitoring"])
 def detect_anomalies():

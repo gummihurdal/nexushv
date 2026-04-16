@@ -392,6 +392,43 @@ class TestResize:
         assert r.status_code == 404
 
 
+class TestVMComparison:
+    def test_compare_vms(self):
+        r = client.get("/api/compare/vms?names=prod-db-primary,prod-web-01")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["vms"]) == 2
+        assert "most_efficient" in data
+
+    def test_compare_no_names(self):
+        r = client.get("/api/compare/vms?names=")
+        assert r.status_code == 400
+
+
+class TestComplianceExport:
+    def test_audit_export(self):
+        r = client.get("/api/compliance/audit-export?hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        assert "export_info" in data
+        assert "security_posture" in data
+        assert "audit_entries" in data
+
+
+class TestTags:
+    def test_list_tags(self):
+        # Set a tag first
+        client.put("/api/vms/prod-db-primary/notes?notes=test&tags=database,critical")
+        r = client.get("/api/tags")
+        assert r.status_code == 200
+        assert "database" in r.json()["tags"]
+
+    def test_vms_by_tag(self):
+        client.put("/api/vms/prod-db-primary/notes?notes=test&tags=database,critical")
+        r = client.get("/api/tags/database/vms")
+        assert r.status_code == 200
+
+
 class TestCostEstimation:
     def test_cost_estimate(self):
         r = client.get("/api/costs/estimate")
