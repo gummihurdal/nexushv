@@ -44,6 +44,56 @@ export default function AIChat() {
     setMessages(prev => [...prev, { role: "user", content: userMsg }]);
     setLoading(true);
 
+    // Try WebSocket streaming first for real-time token display
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${proto}//${window.location.host}/ws/ai/stream`;
+
+    try {
+      const streamWs = new WebSocket(wsUrl);
+      let tokens = [];
+
+      // Add empty assistant message that we'll update
+      setMessages(prev => [...prev, { role: "assistant", content: "" }]);
+
+      streamWs.onopen = () => {
+        streamWs.send(JSON.stringify({ message: userMsg }));
+      };
+
+      streamWs.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.token) {
+          tokens.push(data.token);
+          const fullText = tokens.join("");
+          setMessages(prev => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { role: "assistant", content: fullText };
+            return updated;
+          });
+        }
+        if (data.done) {
+          streamWs.close();
+          setLoading(false);
+        }
+      };
+
+      streamWs.onerror = () => {
+        // Fallback to REST API if WebSocket fails
+        streamWs.close();
+        fallbackChat(userMsg);
+      };
+
+      streamWs.onclose = () => {
+        if (tokens.length === 0) {
+          // WebSocket closed without sending — fallback
+          fallbackChat(userMsg);
+        }
+      };
+    } catch (e) {
+      fallbackChat(userMsg);
+    }
+  };
+
+  const fallbackChat = async (userMsg) => {
     try {
       const res = await fetch("/api/ai/chat", {
         method: "POST",
@@ -51,7 +101,16 @@ export default function AIChat() {
         body: JSON.stringify({ message: userMsg }),
       });
       const data = await res.json();
-      setMessages(prev => [...prev, { role: "assistant", content: data.response || "No response received." }]);
+      setMessages(prev => {
+        const updated = [...prev];
+        // Replace last message if it's empty (from failed stream), or append
+        if (updated.length > 0 && updated[updated.length - 1].role === "assistant" && updated[updated.length - 1].content === "") {
+          updated[updated.length - 1] = { role: "assistant", content: data.response || "No response received." };
+        } else {
+          updated.push({ role: "assistant", content: data.response || "No response received." });
+        }
+        return updated;
+      });
     } catch (e) {
       setMessages(prev => [...prev, { role: "assistant", content: `Connection error: ${e.message}. Make sure the NexusHV API is running on port 8080.` }]);
     }

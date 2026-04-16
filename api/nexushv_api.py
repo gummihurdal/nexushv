@@ -1769,6 +1769,55 @@ def dashboard_overview():
         "demo_mode": DEMO_MODE,
     }
 
+# ── System Events API ─────────────────────────────────────────────────────
+@app.get("/api/events", tags=["Events"])
+def get_system_events(limit: int = 50, event_type: Optional[str] = None):
+    """Get recent system events from the audit log, formatted for the UI."""
+    with get_db() as db:
+        if event_type:
+            rows = db.execute(
+                "SELECT * FROM audit_log WHERE action LIKE ? ORDER BY ts DESC LIMIT ?",
+                (f"%{event_type}%", min(limit, 500))
+            ).fetchall()
+        else:
+            rows = db.execute("SELECT * FROM audit_log ORDER BY ts DESC LIMIT ?", (min(limit, 500),)).fetchall()
+        return [{
+            "id": r["id"],
+            "timestamp": r["ts"],
+            "user": r["user"],
+            "action": r["action"],
+            "resource": r["resource"],
+            "detail": r["detail"],
+            "ip": r["ip"],
+            "success": bool(r["success"]),
+        } for r in rows]
+
+# ── API Info ──────────────────────────────────────────────────────────────
+@app.get("/api/info", tags=["System"])
+def api_info():
+    """Get API version and feature information."""
+    return {
+        "product": "NexusHV",
+        "version": "2.0.0",
+        "api_version": "v2",
+        "features": {
+            "jwt_auth": True,
+            "rbac": True,
+            "prometheus_metrics": PROMETHEUS_AVAILABLE,
+            "ai_chat": AI_AVAILABLE,
+            "ai_scanning": AI_AVAILABLE,
+            "webhooks": True,
+            "right_sizing": True,
+            "drs": True,
+            "vm_clone": True,
+            "vm_resize": True,
+            "tls": bool(os.getenv("NEXUSHV_TLS_CERT")),
+            "ha_proxy": True,
+        },
+        "endpoints_count": len(app.routes),
+        "demo_mode": DEMO_MODE,
+    }
+
 # ── Metrics History API ───────────────────────────────────────────────────
 @app.get("/api/metrics/history", tags=["Metrics"])
 def get_metrics_history(metric_type: str = "host_cpu", hours: int = 24):
