@@ -788,6 +788,74 @@ def migrate_vm(name: str, req: MigrateRequest, request: Request):
     finally:
         conn.close()
 
+# ── VM Clone ──────────────────────────────────────────────────────────────
+class CloneRequest(BaseModel):
+    new_name: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+    full_clone: bool = True  # True = full copy, False = linked clone (CoW)
+
+@app.post("/api/vms/{name}/clone", tags=["Virtual Machines"])
+def clone_vm(name: str, req: CloneRequest, request: Request):
+    """Clone a VM. Full clone creates an independent copy; linked clone uses CoW."""
+    ip = request.client.host if request and request.client else "unknown"
+    audit_log("system", "clone_vm", name, f"new_name={req.new_name} full={req.full_clone}", ip)
+
+    if DEMO_MODE:
+        source = next((v for v in _MOCK_VMS if v["name"] == name), None)
+        if not source:
+            raise HTTPException(404, f"Source VM '{name}' not found")
+        if any(v["name"] == req.new_name for v in _MOCK_VMS):
+            raise HTTPException(409, f"VM '{req.new_name}' already exists")
+        clone = {**source, "id": str(_uuid.uuid4()), "name": req.new_name, "state": "poweredOff",
+                 "cpu_pct": 0, "ram_used_pct": 0, "ip": None, "uptime_s": 0}
+        _MOCK_VMS.append(clone)
+        return {"status": "cloned", "source": name, "clone": req.new_name, "type": "full" if req.full_clone else "linked"}
+
+    # Live mode: use virt-clone
+    cmd = ["virt-clone", "--original", name, "--name", req.new_name, "--auto-clone"]
+    if not req.full_clone:
+        cmd.append("--reflink")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise HTTPException(500, f"Clone failed: {result.stderr}")
+    return {"status": "cloned", "source": name, "clone": req.new_name, "type": "full" if req.full_clone else "linked"}
+
+# ── VM Resource Resize ────────────────────────────────────────────────────
+class ResizeRequest(BaseModel):
+    cpu: Optional[int] = Field(None, ge=1, le=128)
+    ram_mb: Optional[int] = Field(None, ge=256, le=4194304)
+
+@app.put("/api/vms/{name}/resize", tags=["Virtual Machines"])
+def resize_vm(name: str, req: ResizeRequest, request: Request):
+    """Resize VM CPU or memory (may require restart)."""
+    ip = request.client.host if request and request.client else "unknown"
+    audit_log("system", "resize_vm", name, f"cpu={req.cpu} ram_mb={req.ram_mb}", ip)
+
+    if DEMO_MODE:
+        vm = next((v for v in _MOCK_VMS if v["name"] == name), None)
+        if not vm:
+            raise HTTPException(404, f"VM '{name}' not found")
+        changes = {}
+        if req.cpu is not None:
+            vm["cpu"] = req.cpu
+            changes["cpu"] = req.cpu
+        if req.ram_mb is not None:
+            vm["ram_mb"] = req.ram_mb
+            changes["ram_mb"] = req.ram_mb
+        return {"status": "resized", "vm": name, "changes": changes}
+
+    conn = get_conn()
+    try:
+        dom = conn.lookupByName(name)
+        if req.cpu is not None:
+            dom.setVcpusFlags(req.cpu, libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+        if req.ram_mb is not None:
+            dom.setMemoryFlags(req.ram_mb * 1024, libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+        return {"status": "resized", "vm": name, "note": "Restart VM for changes to take effect"}
+    except libvirt.libvirtError as e:
+        raise HTTPException(500, str(e))
+    finally:
+        conn.close()
+
 # ── Snapshots ─────────────────────────────────────────────────────────────
 @app.get("/api/vms/{name}/snapshots", tags=["Snapshots"])
 def list_snapshots(name: str):
@@ -1563,4 +1631,23 @@ if os.path.isdir(FRONTEND_DIR):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080, reload=False, access_log=False)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="NexusHV API Server")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--ssl-keyfile", default=os.getenv("NEXUSHV_TLS_KEY"))
+    parser.add_argument("--ssl-certfile", default=os.getenv("NEXUSHV_TLS_CERT"))
+    parser.add_argument("--workers", type=int, default=1)
+    args = parser.parse_args()
+
+    ssl_opts = {}
+    if args.ssl_keyfile and args.ssl_certfile:
+        ssl_opts = {"ssl_keyfile": args.ssl_keyfile, "ssl_certfile": args.ssl_certfile}
+        log.info(f"TLS enabled: cert={args.ssl_certfile}")
+
+    uvicorn.run(
+        app, host=args.host, port=args.port,
+        reload=False, access_log=False,
+        workers=args.workers, **ssl_opts
+    )

@@ -287,6 +287,43 @@ class TestConsole:
         assert "novnc_url" in data
 
 
+class TestClone:
+    def test_clone_vm(self):
+        r = client.post("/api/vms/prod-web-01/clone", json={"new_name": "prod-web-01-clone", "full_clone": True})
+        assert r.status_code == 200
+        assert r.json()["status"] == "cloned"
+        # Clean up
+        client.delete("/api/vms/prod-web-01-clone")
+
+    def test_clone_nonexistent(self):
+        r = client.post("/api/vms/nonexistent/clone", json={"new_name": "clone-test"})
+        assert r.status_code == 404
+
+    def test_clone_duplicate_name(self):
+        r = client.post("/api/vms/prod-web-01/clone", json={"new_name": "prod-db-primary"})
+        assert r.status_code == 409
+
+
+class TestResize:
+    def test_resize_cpu(self):
+        r = client.put("/api/vms/prod-web-01/resize", json={"cpu": 8})
+        assert r.status_code == 200
+        assert r.json()["changes"]["cpu"] == 8
+
+    def test_resize_ram(self):
+        r = client.put("/api/vms/prod-web-01/resize", json={"ram_mb": 32768})
+        assert r.status_code == 200
+        assert r.json()["changes"]["ram_mb"] == 32768
+
+    def test_resize_both(self):
+        r = client.put("/api/vms/prod-web-01/resize", json={"cpu": 4, "ram_mb": 16384})
+        assert r.status_code == 200
+
+    def test_resize_nonexistent(self):
+        r = client.put("/api/vms/nonexistent/resize", json={"cpu": 2})
+        assert r.status_code == 404
+
+
 class TestPrometheus:
     def test_prometheus_metrics(self):
         r = client.get("/metrics")
