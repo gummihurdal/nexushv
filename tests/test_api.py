@@ -287,6 +287,56 @@ class TestConsole:
         assert "novnc_url" in data
 
 
+class TestDiskManagement:
+    def test_list_vm_disks(self):
+        r = client.get("/api/vms/prod-db-primary/disks")
+        assert r.status_code == 200
+        disks = r.json()
+        assert len(disks) >= 1
+        assert "device" in disks[0]
+
+    def test_list_disks_not_found(self):
+        r = client.get("/api/vms/nonexistent/disks")
+        assert r.status_code == 404
+
+
+class TestBatchOperations:
+    def test_batch_stop(self):
+        r = client.post("/api/batch/vm-action", json={
+            "vm_names": ["k8s-worker-01", "backup-appliance"],
+            "action": "stop"
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total"] == 2
+        assert data["succeeded"] >= 0
+        # Restart them
+        client.post("/api/batch/vm-action", json={
+            "vm_names": ["k8s-worker-01", "backup-appliance"],
+            "action": "start"
+        })
+
+    def test_batch_invalid_action(self):
+        r = client.post("/api/batch/vm-action", json={
+            "vm_names": ["prod-web-01"],
+            "action": "explode"
+        })
+        assert r.status_code == 400
+
+
+class TestExport:
+    def test_export_vm_config(self):
+        r = client.get("/api/vms/prod-db-primary/export")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["name"] == "prod-db-primary"
+        assert "exported_at" in data
+
+    def test_export_not_found(self):
+        r = client.get("/api/vms/nonexistent/export")
+        assert r.status_code == 404
+
+
 class TestClone:
     def test_clone_vm(self):
         r = client.post("/api/vms/prod-web-01/clone", json={"new_name": "prod-web-01-clone", "full_clone": True})

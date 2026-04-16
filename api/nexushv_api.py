@@ -788,6 +788,104 @@ def migrate_vm(name: str, req: MigrateRequest, request: Request):
     finally:
         conn.close()
 
+# ── VM Disk Management ────────────────────────────────────────────────────
+@app.get("/api/vms/{name}/disks", tags=["Virtual Machines"])
+def list_vm_disks(name: str):
+    """List all disks attached to a VM."""
+    if DEMO_MODE:
+        vm = next((v for v in _MOCK_VMS if v["name"] == name), None)
+        if not vm:
+            raise HTTPException(404, f"VM '{name}' not found")
+        return [
+            {"device": "vda", "path": f"/var/lib/libvirt/images/{name}.qcow2",
+             "format": "qcow2", "size_gb": vm.get("disk_gb", 50), "bus": "virtio"},
+        ]
+    conn = get_conn()
+    try:
+        dom = conn.lookupByName(name)
+        import xml.etree.ElementTree as ET
+        tree = ET.fromstring(dom.XMLDesc(0))
+        disks = []
+        for disk in tree.findall(".//disk[@device='disk']"):
+            source = disk.find("source")
+            target = disk.find("target")
+            driver = disk.find("driver")
+            disks.append({
+                "device": target.get("dev", "unknown") if target is not None else "unknown",
+                "path": source.get("file", source.get("dev", "unknown")) if source is not None else "unknown",
+                "format": driver.get("type", "unknown") if driver is not None else "unknown",
+                "bus": target.get("bus", "unknown") if target is not None else "unknown",
+            })
+        return disks
+    except libvirt.libvirtError as e:
+        raise HTTPException(500, str(e))
+    finally:
+        conn.close()
+
+# ── Batch Operations ──────────────────────────────────────────────────────
+class BatchAction(BaseModel):
+    vm_names: list[str]
+    action: str  # start | stop | suspend | resume
+
+@app.post("/api/batch/vm-action", tags=["Virtual Machines"])
+def batch_vm_action(req: BatchAction, request: Request):
+    """Execute an action on multiple VMs at once."""
+    ip = request.client.host if request and request.client else "unknown"
+    valid_actions = {"start", "stop", "suspend", "resume", "force-stop"}
+    if req.action not in valid_actions:
+        raise HTTPException(400, f"Invalid action. Valid: {', '.join(sorted(valid_actions))}")
+
+    results = []
+    for name in req.vm_names:
+        try:
+            action_req = VMAction(action=req.action)
+            vm_action(name, action_req, request)
+            results.append({"vm": name, "status": "ok", "action": req.action})
+        except HTTPException as e:
+            results.append({"vm": name, "status": "error", "detail": e.detail})
+        except Exception as e:
+            results.append({"vm": name, "status": "error", "detail": str(e)})
+
+    audit_log("system", f"batch_{req.action}", ",".join(req.vm_names),
+              f"{len([r for r in results if r['status']=='ok'])}/{len(results)} succeeded", ip)
+
+    return {
+        "action": req.action,
+        "total": len(results),
+        "succeeded": len([r for r in results if r["status"] == "ok"]),
+        "results": results,
+    }
+
+# ── VM Export/Import ──────────────────────────────────────────────────────
+@app.get("/api/vms/{name}/export", tags=["Virtual Machines"])
+def export_vm_config(name: str):
+    """Export VM configuration as JSON (for backup or template creation)."""
+    if DEMO_MODE:
+        vm = next((v for v in _MOCK_VMS if v["name"] == name), None)
+        if not vm:
+            raise HTTPException(404, f"VM '{name}' not found")
+        return {
+            "name": vm["name"],
+            "cpu": vm.get("cpu", 2),
+            "ram_mb": vm.get("ram_mb", 4096),
+            "disk_gb": vm.get("disk_gb", 50),
+            "os": vm.get("os", "unknown"),
+            "autostart": vm.get("autostart", False),
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+        }
+    conn = get_conn()
+    try:
+        dom = conn.lookupByName(name)
+        return {
+            "name": name,
+            "xml": dom.XMLDesc(0),
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except libvirt.libvirtError as e:
+        raise HTTPException(500, str(e))
+    finally:
+        conn.close()
+
 # ── VM Clone ──────────────────────────────────────────────────────────────
 class CloneRequest(BaseModel):
     new_name: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
