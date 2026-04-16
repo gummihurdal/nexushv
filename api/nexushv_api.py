@@ -2863,6 +2863,166 @@ def export_audit_for_compliance(hours: int = 720, format: str = "json"):
         },
     }
 
+# ── VM Import ─────────────────────────────────────────────────────────────
+class VMImport(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+    source_path: str = Field(..., description="Path to OVA, VMDK, or QCOW2 file on host")
+    cpu: int = Field(default=2, ge=1, le=128)
+    ram_gb: int = Field(default=4, ge=1, le=4096)
+
+@app.post("/api/vms/import", tags=["Virtual Machines"])
+def import_vm(req: VMImport, request: Request):
+    """Import a VM from OVA, VMDK, or QCOW2 file."""
+    ip = request.client.host if request and request.client else "unknown"
+    audit_log("system", "import_vm", req.name, f"source={req.source_path}", ip)
+
+    if DEMO_MODE:
+        new_vm = {
+            "id": str(_uuid.uuid4()), "name": req.name, "state": "poweredOff",
+            "cpu": req.cpu, "ram_mb": req.ram_gb * 1024, "cpu_pct": 0,
+            "ram_used_pct": 0, "persistent": True, "autostart": False,
+            "disk_gb": 100, "os": "Imported", "ip": None, "uptime_s": 0,
+        }
+        _MOCK_VMS.append(new_vm)
+        return {
+            "status": "imported",
+            "name": req.name,
+            "source": req.source_path,
+            "note": "In demo mode — VM created with mock data. In live mode, disk would be converted to QCOW2.",
+        }
+
+    # Detect format and convert if needed
+    target_path = f"/var/lib/libvirt/images/{req.name}.qcow2"
+    source = req.source_path
+
+    if source.endswith(".ova"):
+        # Extract OVA (tar containing VMDK + OVF)
+        result = subprocess.run(["tar", "xf", source, "-C", "/tmp/"], capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            raise HTTPException(500, f"OVA extraction failed: {result.stderr}")
+        # Find VMDK in extracted files
+        vmdk = subprocess.getoutput(f"find /tmp/ -name '*.vmdk' -newer {source} | head -1")
+        if not vmdk:
+            raise HTTPException(500, "No VMDK found in OVA")
+        source = vmdk
+
+    if source.endswith(".vmdk"):
+        # Convert VMDK to QCOW2
+        result = subprocess.run(
+            ["qemu-img", "convert", "-f", "vmdk", "-O", "qcow2", "-o", "preallocation=metadata", source, target_path],
+            capture_output=True, text=True, timeout=600
+        )
+        if result.returncode != 0:
+            raise HTTPException(500, f"Disk conversion failed: {result.stderr}")
+    elif source.endswith(".qcow2"):
+        # Copy QCOW2
+        subprocess.run(["cp", source, target_path], check=True, timeout=300)
+    elif source.endswith(".raw") or source.endswith(".img"):
+        # Convert raw to QCOW2
+        result = subprocess.run(
+            ["qemu-img", "convert", "-f", "raw", "-O", "qcow2", source, target_path],
+            capture_output=True, text=True, timeout=600
+        )
+        if result.returncode != 0:
+            raise HTTPException(500, f"Disk conversion failed: {result.stderr}")
+    else:
+        raise HTTPException(400, f"Unsupported format. Supported: .ova, .vmdk, .qcow2, .raw, .img")
+
+    # Create VM with virt-install
+    cmd = [
+        "virt-install", "--name", req.name,
+        "--memory", str(req.ram_gb * 1024), "--vcpus", str(req.cpu),
+        "--disk", f"path={target_path},format=qcow2,bus=virtio",
+        "--network", "network=default,model=virtio",
+        "--graphics", "vnc,listen=127.0.0.1",
+        "--import", "--noautoconsole",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise HTTPException(500, f"VM creation failed: {result.stderr}")
+
+    return {"status": "imported", "name": req.name, "disk": target_path, "source": req.source_path}
+
+# ── Disk Online Resize ────────────────────────────────────────────────────
+class DiskResize(BaseModel):
+    size_gb: int = Field(..., ge=1, le=100000, description="New disk size in GB (must be larger than current)")
+
+@app.post("/api/vms/{name}/disks/{device}/resize", tags=["Virtual Machines"])
+def resize_vm_disk(name: str, device: str, req: DiskResize, request: Request):
+    """Online disk resize — grow a VM's disk while it's running."""
+    ip = request.client.host if request and request.client else "unknown"
+    audit_log("system", "resize_disk", name, f"device={device} size={req.size_gb}GB", ip)
+
+    if DEMO_MODE:
+        vm = next((v for v in _MOCK_VMS if v["name"] == name), None)
+        if not vm:
+            raise HTTPException(404, f"VM '{name}' not found")
+        vm["disk_gb"] = req.size_gb
+        return {
+            "status": "resized",
+            "vm": name,
+            "device": device,
+            "new_size_gb": req.size_gb,
+            "note": "Guest OS must also extend the filesystem: resize2fs /dev/vda (Linux) or Disk Management (Windows)",
+        }
+
+    conn = get_conn()
+    try:
+        dom = conn.lookupByName(name)
+        # Resize the block device
+        dom.blockResize(device, req.size_gb * 1024 * 1024 * 1024)  # bytes
+        return {
+            "status": "resized",
+            "vm": name,
+            "device": device,
+            "new_size_gb": req.size_gb,
+            "note": "Disk expanded. Guest OS must extend filesystem.",
+        }
+    except libvirt.libvirtError as e:
+        raise HTTPException(500, str(e))
+    finally:
+        conn.close()
+
+# ── Host Network Interfaces ──────────────────────────────────────────────
+@app.get("/api/hosts/local/interfaces", tags=["Hosts"])
+def list_host_interfaces():
+    """List all host network interfaces with their configuration."""
+    net_if = psutil.net_if_addrs()
+    net_stats = psutil.net_if_stats()
+    net_io = psutil.net_io_counters(pernic=True)
+
+    interfaces = []
+    for name, addrs in net_if.items():
+        stats = net_stats.get(name)
+        io = net_io.get(name)
+        iface = {
+            "name": name,
+            "is_up": stats.isup if stats else False,
+            "speed_mbps": stats.speed if stats else 0,
+            "mtu": stats.mtu if stats else 0,
+            "duplex": str(stats.duplex) if stats else "unknown",
+            "addresses": [],
+            "io": {
+                "bytes_sent": io.bytes_sent if io else 0,
+                "bytes_recv": io.bytes_recv if io else 0,
+                "packets_sent": io.packets_sent if io else 0,
+                "packets_recv": io.packets_recv if io else 0,
+                "errors_in": io.errin if io else 0,
+                "errors_out": io.errout if io else 0,
+                "drops_in": io.dropin if io else 0,
+                "drops_out": io.dropout if io else 0,
+            },
+        }
+        for addr in addrs:
+            iface["addresses"].append({
+                "family": str(addr.family.name) if hasattr(addr.family, 'name') else str(addr.family),
+                "address": addr.address,
+                "netmask": addr.netmask,
+            })
+        interfaces.append(iface)
+
+    return {"interfaces": interfaces, "count": len(interfaces)}
+
 # ── VM Tag Management ─────────────────────────────────────────────────────
 @app.get("/api/tags", tags=["Tags"])
 def list_all_tags():

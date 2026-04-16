@@ -392,6 +392,40 @@ class TestResize:
         assert r.status_code == 404
 
 
+class TestVMImport:
+    def test_import_vm(self):
+        r = client.post("/api/vms/import", json={
+            "name": "imported-vm-01",
+            "source_path": "/tmp/test.vmdk",
+            "cpu": 2,
+            "ram_gb": 4,
+        })
+        assert r.status_code == 200
+        assert r.json()["status"] == "imported"
+        client.delete("/api/vms/imported-vm-01")
+
+
+class TestDiskResize:
+    def test_resize_disk(self):
+        r = client.post("/api/vms/prod-db-primary/disks/vda/resize", json={"size_gb": 600})
+        assert r.status_code == 200
+        assert r.json()["new_size_gb"] == 600
+
+    def test_resize_nonexistent(self):
+        r = client.post("/api/vms/nonexistent/disks/vda/resize", json={"size_gb": 100})
+        assert r.status_code == 404
+
+
+class TestHostInterfaces:
+    def test_list_interfaces(self):
+        r = client.get("/api/hosts/local/interfaces")
+        assert r.status_code == 200
+        data = r.json()
+        assert "interfaces" in data
+        assert data["count"] >= 1
+        assert "io" in data["interfaces"][0]
+
+
 class TestVMComparison:
     def test_compare_vms(self):
         r = client.get("/api/compare/vms?names=prod-db-primary,prod-web-01")
