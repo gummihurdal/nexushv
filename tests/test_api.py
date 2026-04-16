@@ -436,6 +436,61 @@ class TestDashboard:
         assert "alerts" in data
 
 
+class TestPasswordChange:
+    def test_refresh_token(self):
+        login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+        token = login.json()["token"]
+        r = client.post("/api/auth/refresh", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        assert "token" in r.json()
+
+
+class TestSnapshotPolicies:
+    def test_list_policies(self):
+        r = client.get("/api/snapshot-policies")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_create_policy(self):
+        r = client.post("/api/snapshot-policies", json={
+            "vm_name": "prod-db-primary", "interval_hours": 24, "max_snapshots": 7
+        })
+        assert r.status_code == 200
+        assert r.json()["status"] == "created"
+
+    def test_delete_policy(self):
+        client.post("/api/snapshot-policies", json={"vm_name": "test-policy-vm", "interval_hours": 12})
+        r = client.delete("/api/snapshot-policies/test-policy-vm")
+        assert r.status_code == 200
+
+
+class TestStorageAnalytics:
+    def test_analytics(self):
+        r = client.get("/api/storage/analytics")
+        assert r.status_code == 200
+        data = r.json()
+        assert "summary" in data
+        assert "thin_provisioning" in data
+        assert "projections" in data
+
+
+class TestTasks:
+    def test_list_tasks(self):
+        r = client.get("/api/tasks")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+
+class TestVMResourceSummary:
+    def test_resource_summary(self):
+        r = client.get("/api/vms/summary/resources")
+        assert r.status_code == 200
+        data = r.json()
+        assert "total_vms" in data
+        assert "resources" in data
+        assert "top_cpu_vms" in data
+
+
 class TestNetworkTopology:
     def test_network_topology(self):
         r = client.get("/api/network/topology")

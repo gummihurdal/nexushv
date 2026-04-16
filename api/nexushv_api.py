@@ -1794,6 +1794,148 @@ def rightsizing_recommendations():
         "analyzed_at": datetime.now(timezone.utc).isoformat(),
     }
 
+# ── Password Change ───────────────────────────────────────────────────────
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str = Field(..., min_length=6)
+
+@app.post("/api/auth/change-password", tags=["Authentication"])
+async def change_password(req: PasswordChange, user: TokenData = Depends(require_auth)):
+    """Change current user's password."""
+    with get_db() as db:
+        row = db.execute("SELECT password_hash FROM users WHERE username = ?", (user.username,)).fetchone()
+        if not row:
+            raise HTTPException(404, "User not found")
+        loop = asyncio.get_event_loop()
+        valid = await loop.run_in_executor(None, bcrypt.checkpw, req.current_password.encode(), row["password_hash"].encode())
+        if not valid:
+            raise HTTPException(401, "Current password is incorrect")
+        new_hash = await loop.run_in_executor(None, bcrypt.hashpw, req.new_password.encode(), bcrypt.gensalt())
+        db.execute("UPDATE users SET password_hash = ? WHERE username = ?", (new_hash.decode(), user.username))
+    audit_log(user.username, "change_password")
+    return {"status": "password_changed"}
+
+@app.post("/api/auth/refresh", tags=["Authentication"])
+async def refresh_token(user: TokenData = Depends(require_auth)):
+    """Get a fresh JWT token (extends expiry)."""
+    token = create_token(user.username, user.role)
+    return {"token": token, "username": user.username, "role": user.role, "expires_in": JWT_EXPIRE_HOURS * 3600}
+
+# ── Snapshot Scheduling ──────────────────────────────────────────────────
+class SnapshotPolicy(BaseModel):
+    vm_name: str
+    interval_hours: int = Field(default=24, ge=1, le=720)
+    max_snapshots: int = Field(default=7, ge=1, le=100)
+    enabled: bool = True
+
+@app.get("/api/snapshot-policies", tags=["Snapshots"])
+def list_snapshot_policies():
+    """List all automated snapshot policies."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'snapshot_policies'").fetchone()
+        if row:
+            return json.loads(row["value"])
+    return []
+
+@app.post("/api/snapshot-policies", tags=["Snapshots"])
+def create_snapshot_policy(policy: SnapshotPolicy):
+    """Create or update an automated snapshot policy for a VM."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'snapshot_policies'").fetchone()
+        policies = json.loads(row["value"]) if row else []
+        # Update or add
+        policies = [p for p in policies if p["vm_name"] != policy.vm_name]
+        policies.append(policy.model_dump())
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('snapshot_policies', ?)", (json.dumps(policies),))
+    audit_log("system", "snapshot_policy", policy.vm_name, f"interval={policy.interval_hours}h max={policy.max_snapshots}")
+    return {"status": "created", "policy": policy.model_dump()}
+
+@app.delete("/api/snapshot-policies/{vm_name}", tags=["Snapshots"])
+def delete_snapshot_policy(vm_name: str):
+    """Delete a snapshot policy."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'snapshot_policies'").fetchone()
+        if row:
+            policies = json.loads(row["value"])
+            policies = [p for p in policies if p["vm_name"] != vm_name]
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('snapshot_policies', ?)", (json.dumps(policies),))
+    return {"status": "deleted", "vm_name": vm_name}
+
+# ── Storage Analytics ─────────────────────────────────────────────────────
+@app.get("/api/storage/analytics", tags=["Storage"])
+def storage_analytics():
+    """Storage analytics: utilization trends, thin provisioning efficiency, recommendations."""
+    storage = list_storage()
+    vms = list_vms()
+
+    total_capacity = sum(s.get("capacity_gb", 0) for s in storage)
+    total_used = sum(s.get("used_gb", 0) for s in storage)
+    total_free = sum(s.get("free_gb", 0) for s in storage)
+
+    # VM disk allocation vs actual usage (thin provisioning efficiency)
+    total_vm_allocated = sum(v.get("disk_gb", 0) for v in vms)
+    thin_ratio = round(total_vm_allocated / max(total_used, 1), 2) if total_used > 0 else 1.0
+
+    pools_at_risk = [s for s in storage if s.get("capacity_gb", 0) > 0 and
+                     (s["capacity_gb"] - s.get("free_gb", 0)) / s["capacity_gb"] > 0.75]
+
+    # Estimate days until full based on growth rate (simplified)
+    growth_rate_gb_day = total_used * 0.001  # assume 0.1% daily growth
+    days_until_full = round(total_free / max(growth_rate_gb_day, 0.01))
+
+    return {
+        "summary": {
+            "total_capacity_gb": round(total_capacity, 1),
+            "total_used_gb": round(total_used, 1),
+            "total_free_gb": round(total_free, 1),
+            "utilization_pct": round(total_used / max(total_capacity, 1) * 100, 1),
+        },
+        "thin_provisioning": {
+            "vm_allocated_gb": total_vm_allocated,
+            "actual_used_gb": round(total_used, 1),
+            "overcommit_ratio": thin_ratio,
+            "efficiency": f"{round((1 - 1/max(thin_ratio, 0.01)) * 100)}% space saved",
+        },
+        "projections": {
+            "est_growth_gb_day": round(growth_rate_gb_day, 1),
+            "est_days_until_full": min(days_until_full, 9999),
+        },
+        "pools_at_risk": [s["name"] for s in pools_at_risk],
+        "recommendations": [
+            r for r in [
+                f"Pool '{s['name']}' at {round((s['capacity_gb']-s.get('free_gb',0))/s['capacity_gb']*100)}% — consider expansion"
+                for s in pools_at_risk
+            ]
+        ],
+        "pool_count": len(storage),
+    }
+
+# ── Task/Job Tracking ────────────────────────────────────────────────────
+_active_tasks: dict[str, dict] = {}
+
+@app.get("/api/tasks", tags=["Tasks"])
+def list_tasks():
+    """List recent and active background tasks (migrations, clones, snapshots)."""
+    with get_db() as db:
+        recent = db.execute(
+            "SELECT * FROM audit_log WHERE action IN ('migrate_vm','clone_vm','create_snapshot','batch_stop','batch_start') ORDER BY ts DESC LIMIT 20"
+        ).fetchall()
+    tasks = []
+    for r in recent:
+        tasks.append({
+            "id": r["id"],
+            "type": r["action"],
+            "resource": r["resource"],
+            "detail": r["detail"],
+            "timestamp": r["ts"],
+            "status": "completed" if r["success"] else "failed",
+            "user": r["user"],
+        })
+    # Add active tasks
+    for tid, t in _active_tasks.items():
+        tasks.insert(0, {"id": tid, "status": "running", **t})
+    return tasks
+
 # ── VM Resource Summary ───────────────────────────────────────────────────
 @app.get("/api/vms/summary/resources", tags=["Virtual Machines"])
 def vm_resource_summary():
