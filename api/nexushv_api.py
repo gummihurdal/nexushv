@@ -2562,6 +2562,45 @@ def get_console_websocket(name: str):
     finally:
         conn.close()
 
+# ── Cluster Comparison (multi-host) ───────────────────────────────────────
+@app.get("/api/cluster/compare", tags=["Cluster"])
+def compare_hosts():
+    """Compare host resources for migration planning and load balancing decisions."""
+    host = local_host_info()
+    vms = list_vms()
+
+    # In demo mode, simulate a second host
+    hosts = [
+        {
+            "name": host["hostname"],
+            "ip": "10.0.1.10",
+            "cpu_cores": host["cpu_count"],
+            "cpu_pct": host["cpu_pct"],
+            "ram_gb": host["ram_total_gb"],
+            "ram_pct": host.get("ram_pct", 0),
+            "vm_count": len([v for v in vms if v["state"] == "poweredOn"]),
+            "total_vcpu": sum(v.get("cpu", 0) for v in vms),
+        },
+    ]
+    if DEMO_MODE:
+        hosts.append({
+            "name": "esxi-prod-02",
+            "ip": "10.0.1.11",
+            "cpu_cores": host["cpu_count"],
+            "cpu_pct": round(host["cpu_pct"] * 0.5, 1),
+            "ram_gb": host["ram_total_gb"],
+            "ram_pct": round(host.get("ram_pct", 0) * 0.6, 1),
+            "vm_count": 3,
+            "total_vcpu": 12,
+        })
+
+    return {
+        "hosts": hosts,
+        "most_loaded": max(hosts, key=lambda h: h["cpu_pct"])["name"],
+        "least_loaded": min(hosts, key=lambda h: h["cpu_pct"])["name"],
+        "recommendation": "Cluster is balanced" if len(hosts) < 2 or abs(hosts[0]["cpu_pct"] - hosts[-1]["cpu_pct"]) < 20 else "Consider migrating VMs from overloaded host",
+    }
+
 # ── Serve frontend static files ──────────────────────────────────────────
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "ui", "dist")
 if os.path.isdir(FRONTEND_DIR):
