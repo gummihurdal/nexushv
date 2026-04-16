@@ -2244,7 +2244,7 @@ def vm_timeline(name: str, limit: int = 50):
 def global_search(q: str):
     """Search across VMs, storage, networks, alerts, and events."""
     if not q or len(q) < 2:
-        return {"results": [], "query": q}
+        return {"results": [], "query": q, "count": 0}
 
     q_lower = q.lower()
     results = []

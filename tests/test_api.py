@@ -392,6 +392,66 @@ class TestResize:
         assert r.status_code == 404
 
 
+class TestSearch:
+    def test_search_vms(self):
+        r = client.get("/api/search?q=prod")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["count"] >= 1
+        assert any(res["type"] == "vm" for res in data["results"])
+
+    def test_search_short_query(self):
+        r = client.get("/api/search?q=x")
+        assert r.status_code == 200
+        assert r.json()["count"] == 0
+
+    def test_search_no_results(self):
+        r = client.get("/api/search?q=zzzznonexistent")
+        assert r.status_code == 200
+        assert r.json()["count"] == 0
+
+
+class TestActivitySummary:
+    def test_activity_summary(self):
+        r = client.get("/api/activity/summary?hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        assert "total_actions" in data
+        assert "top_actions" in data
+
+
+class TestVMTimeline:
+    def test_vm_timeline(self):
+        # Generate some activity first
+        client.post("/api/vms/prod-web-01/action", json={"action": "stop"})
+        client.post("/api/vms/prod-web-01/action", json={"action": "start"})
+        r = client.get("/api/vms/prod-web-01/timeline")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+
+class TestAPIInfo:
+    def test_api_info(self):
+        r = client.get("/api/info")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["product"] == "NexusHV"
+        assert data["version"] == "2.0.0"
+        assert "features" in data
+        assert data["endpoints_count"] >= 50
+
+
+class TestEvents:
+    def test_get_events(self):
+        r = client.get("/api/events")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_get_events_filtered(self):
+        r = client.get("/api/events?event_type=vm")
+        assert r.status_code == 200
+
+
 class TestPrometheus:
     def test_prometheus_metrics(self):
         r = client.get("/metrics")
