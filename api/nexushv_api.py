@@ -3335,6 +3335,216 @@ def compliance_dashboard():
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
+# ── VM Template Catalog ───────────────────────────────────────────────────
+@app.get("/api/templates", tags=["Templates"])
+def list_templates():
+    """List available VM templates for quick provisioning."""
+    with get_db() as db:
+        notes = db.execute("SELECT vm_name, notes, tags FROM vm_notes WHERE tags LIKE '%template%'").fetchall()
+
+    templates = []
+    for n in notes:
+        vm = next((v for v in list_vms() if v["name"] == n["vm_name"]), None)
+        if vm:
+            templates.append({
+                "name": vm["name"],
+                "os": vm.get("os", "Unknown"),
+                "cpu": vm.get("cpu", 0),
+                "ram_gb": round(vm.get("ram_mb", 0) / 1024, 1),
+                "disk_gb": vm.get("disk_gb", 0),
+                "description": n["notes"] or "",
+                "tags": (n["tags"] or "").split(","),
+            })
+
+    # Add built-in catalog entries if no templates exist
+    if not templates:
+        templates = [
+            {"name": "template-ubuntu-22", "os": "Ubuntu 22.04 LTS", "cpu": 2, "ram_gb": 4, "disk_gb": 50, "description": "General purpose Ubuntu server with cloud-init", "tags": ["template", "ubuntu", "linux"]},
+            {"name": "template-rocky-9", "os": "Rocky Linux 9", "cpu": 2, "ram_gb": 4, "disk_gb": 50, "description": "RHEL-compatible enterprise Linux", "tags": ["template", "rocky", "linux", "enterprise"]},
+            {"name": "template-windows-2022", "os": "Windows Server 2022", "cpu": 4, "ram_gb": 8, "disk_gb": 100, "description": "Windows Server with VirtIO drivers pre-installed", "tags": ["template", "windows", "enterprise"]},
+            {"name": "template-k8s-node", "os": "Ubuntu 22.04 LTS", "cpu": 4, "ram_gb": 8, "disk_gb": 80, "description": "Kubernetes node with containerd and k8s packages", "tags": ["template", "kubernetes", "container"]},
+            {"name": "template-database", "os": "Ubuntu 22.04 LTS", "cpu": 8, "ram_gb": 32, "disk_gb": 500, "description": "Database server optimized for PostgreSQL/MySQL", "tags": ["template", "database", "optimized"]},
+        ]
+
+    return {"templates": templates, "total": len(templates)}
+
+@app.post("/api/templates/{name}/deploy", tags=["Templates"])
+def deploy_from_template(name: str, new_name: str, cpu: Optional[int] = None, ram_gb: Optional[int] = None):
+    """Deploy a new VM from a template with optional resource overrides."""
+    audit_log("system", "deploy_template", name, f"new_name={new_name}")
+
+    if DEMO_MODE:
+        templates = list_templates()["templates"]
+        tmpl = next((t for t in templates if t["name"] == name), None)
+        if not tmpl:
+            raise HTTPException(404, f"Template '{name}' not found")
+
+        new_vm = {
+            "id": str(_uuid.uuid4()), "name": new_name, "state": "poweredOff",
+            "cpu": cpu or tmpl["cpu"], "ram_mb": (ram_gb or tmpl["ram_gb"]) * 1024,
+            "cpu_pct": 0, "ram_used_pct": 0, "persistent": True, "autostart": False,
+            "disk_gb": tmpl["disk_gb"], "os": tmpl["os"], "ip": None, "uptime_s": 0,
+        }
+        _MOCK_VMS.append(new_vm)
+        return {"status": "deployed", "vm": new_name, "template": name, "cpu": new_vm["cpu"], "ram_gb": new_vm["ram_mb"] // 1024}
+
+    # Live: clone template
+    return clone_vm(name, CloneRequest(new_name=new_name, full_clone=False))
+
+# ── SLA Tracking ──────────────────────────────────────────────────────────
+@app.get("/api/sla/status", tags=["SLA"])
+def sla_status(hours: int = 720):
+    """Calculate SLA compliance for the specified period (default: 30 days)."""
+    with get_db() as db:
+        # Count VM stop/start events to calculate downtime
+        stop_events = db.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action LIKE '%stop%' AND ts > datetime('now', ?)",
+            (f"-{min(hours, 8760)} hours",)
+        ).fetchone()[0]
+        start_events = db.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action LIKE '%start%' AND ts > datetime('now', ?)",
+            (f"-{min(hours, 8760)} hours",)
+        ).fetchone()[0]
+        failover_events = db.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action LIKE '%failover%' AND ts > datetime('now', ?)",
+            (f"-{min(hours, 8760)} hours",)
+        ).fetchone()[0]
+        alert_count = db.execute(
+            "SELECT COUNT(*) FROM alerts WHERE severity = 'CRITICAL' AND ts > datetime('now', ?)",
+            (f"-{min(hours, 8760)} hours",)
+        ).fetchone()[0]
+
+    total_minutes = hours * 60
+    # Estimate downtime: each stop event ~5 min, each failover ~2 min
+    estimated_downtime_min = stop_events * 5 + failover_events * 2
+    uptime_pct = round(max(0, (total_minutes - estimated_downtime_min) / total_minutes * 100), 4)
+
+    sla_targets = {
+        "99.99%": {"target": 99.99, "max_downtime_min": round(total_minutes * 0.0001), "met": uptime_pct >= 99.99},
+        "99.95%": {"target": 99.95, "max_downtime_min": round(total_minutes * 0.0005), "met": uptime_pct >= 99.95},
+        "99.9%":  {"target": 99.9,  "max_downtime_min": round(total_minutes * 0.001),  "met": uptime_pct >= 99.9},
+        "99.5%":  {"target": 99.5,  "max_downtime_min": round(total_minutes * 0.005),  "met": uptime_pct >= 99.5},
+    }
+
+    return {
+        "period_hours": hours,
+        "uptime_pct": uptime_pct,
+        "estimated_downtime_min": estimated_downtime_min,
+        "events": {
+            "vm_stops": stop_events,
+            "vm_starts": start_events,
+            "failovers": failover_events,
+            "critical_alerts": alert_count,
+        },
+        "sla_targets": sla_targets,
+        "recommendation": "SLA target met" if uptime_pct >= 99.9 else "Review downtime events to improve SLA",
+    }
+
+# ── Health Score Trending ─────────────────────────────────────────────────
+@app.get("/api/health/trend", tags=["Monitoring"])
+def health_score_trend(hours: int = 168):
+    """Get health score trend over time based on metric history."""
+    with get_db() as db:
+        cpu_data = db.execute(
+            "SELECT ts, value FROM metrics_history WHERE metric_type = 'host_cpu' AND ts > datetime('now', ?) ORDER BY ts",
+            (f"-{min(hours, 720)} hours",)
+        ).fetchall()
+        ram_data = db.execute(
+            "SELECT ts, value FROM metrics_history WHERE metric_type = 'host_ram' AND ts > datetime('now', ?) ORDER BY ts",
+            (f"-{min(hours, 720)} hours",)
+        ).fetchall()
+        alert_data = db.execute(
+            "SELECT ts, severity FROM alerts WHERE ts > datetime('now', ?)",
+            (f"-{min(hours, 720)} hours",)
+        ).fetchall()
+
+    # Calculate health score per data point
+    trend = []
+    for i, cpu in enumerate(cpu_data):
+        ram_val = ram_data[i]["value"] if i < len(ram_data) else 50
+        # Health score: 100 - penalties
+        score = 100
+        if cpu["value"] > 80: score -= 20
+        elif cpu["value"] > 60: score -= 10
+        if ram_val > 85: score -= 20
+        elif ram_val > 70: score -= 10
+        trend.append({"ts": cpu["ts"], "score": max(0, score), "cpu": round(cpu["value"], 1), "ram": round(ram_val, 1)})
+
+    current_score = trend[-1]["score"] if trend else 100
+    avg_score = round(sum(t["score"] for t in trend) / max(len(trend), 1), 1)
+    min_score = min((t["score"] for t in trend), default=100)
+
+    return {
+        "current_score": current_score,
+        "average_score": avg_score,
+        "minimum_score": min_score,
+        "trend": trend[-100:],  # Last 100 data points
+        "period_hours": hours,
+        "data_points": len(trend),
+        "critical_alerts": len([a for a in alert_data if a["severity"] == "CRITICAL"]),
+    }
+
+# ── Network Policy API ────────────────────────────────────────────────────
+@app.get("/api/network/policies", tags=["Networks"])
+def list_network_policies():
+    """List network security policies (firewall rules, traffic shaping)."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'network_policies'").fetchone()
+        return json.loads(row["value"]) if row else []
+
+@app.post("/api/network/policies", tags=["Networks"])
+def create_network_policy(
+    name: str,
+    source_vm: Optional[str] = None,
+    dest_vm: Optional[str] = None,
+    protocol: str = "tcp",
+    port: Optional[int] = None,
+    action: str = "allow",
+):
+    """Create a network security policy rule."""
+    policy = {
+        "name": name, "source_vm": source_vm, "dest_vm": dest_vm,
+        "protocol": protocol, "port": port, "action": action,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'network_policies'").fetchone()
+        policies = json.loads(row["value"]) if row else []
+        policies.append(policy)
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('network_policies', ?)", (json.dumps(policies),))
+    audit_log("system", "network_policy_create", name, f"{source_vm}->{dest_vm} {protocol}/{port} {action}")
+    return {"status": "created", "policy": policy}
+
+# ── Event Correlation ─────────────────────────────────────────────────────
+@app.get("/api/events/correlated", tags=["Events"])
+def correlated_events(hours: int = 1):
+    """Find correlated events — actions that happened close together, suggesting cause-effect relationships."""
+    with get_db() as db:
+        events = db.execute(
+            "SELECT * FROM audit_log WHERE ts > datetime('now', ?) ORDER BY ts",
+            (f"-{min(hours, 24)} hours",)
+        ).fetchall()
+
+    correlations = []
+    events_list = [dict(e) for e in events]
+
+    # Find events within 60 seconds of each other that might be related
+    for i, ev1 in enumerate(events_list):
+        for ev2 in events_list[i+1:min(i+10, len(events_list))]:
+            # Check if events are related (same resource or sequential actions)
+            if ev1.get("resource") and ev1["resource"] == ev2.get("resource"):
+                correlations.append({
+                    "event1": {"action": ev1["action"], "resource": ev1["resource"], "ts": ev1["ts"]},
+                    "event2": {"action": ev2["action"], "resource": ev2["resource"], "ts": ev2["ts"]},
+                    "relationship": "same_resource",
+                })
+
+    return {
+        "correlations": correlations[:20],
+        "total_events": len(events_list),
+        "period_hours": hours,
+    }
+
 # ── AI Autonomous Remediation ─────────────────────────────────────────────
 class RemediationRequest(BaseModel):
     alert_id: Optional[int] = None

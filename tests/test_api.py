@@ -392,6 +392,71 @@ class TestResize:
         assert r.status_code == 404
 
 
+class TestTemplates:
+    def test_list_templates(self):
+        r = client.get("/api/templates")
+        assert r.status_code == 200
+        data = r.json()
+        assert "templates" in data
+        assert data["total"] >= 1
+
+    def test_deploy_template(self):
+        r = client.post("/api/templates/template-ubuntu-22/deploy?new_name=deployed-test-01")
+        assert r.status_code == 200
+        assert r.json()["status"] == "deployed"
+        client.delete("/api/vms/deployed-test-01")
+
+    def test_deploy_with_overrides(self):
+        r = client.post("/api/templates/template-ubuntu-22/deploy?new_name=deployed-test-02&cpu=8&ram_gb=16")
+        assert r.status_code == 200
+        assert r.json()["cpu"] == 8
+        client.delete("/api/vms/deployed-test-02")
+
+
+class TestSLA:
+    def test_sla_status(self):
+        r = client.get("/api/sla/status?hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        assert "uptime_pct" in data
+        assert "sla_targets" in data
+        assert data["uptime_pct"] >= 0
+        assert data["uptime_pct"] <= 100
+
+
+class TestHealthTrend:
+    def test_health_trend(self):
+        r = client.get("/api/health/trend?hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        assert "current_score" in data
+        assert "average_score" in data
+
+
+class TestNetworkPolicies:
+    def test_list_policies(self):
+        r = client.get("/api/network/policies")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_create_policy(self):
+        r = client.post("/api/network/policies?name=allow-web-to-db&source_vm=prod-web-01&dest_vm=prod-db-primary&protocol=tcp&port=5432&action=allow")
+        assert r.status_code == 200
+        assert r.json()["status"] == "created"
+
+
+class TestEventCorrelation:
+    def test_correlated_events(self):
+        # Generate some events first
+        client.post("/api/vms/prod-web-01/action", json={"action": "stop"})
+        client.post("/api/vms/prod-web-01/action", json={"action": "start"})
+        r = client.get("/api/events/correlated?hours=1")
+        assert r.status_code == 200
+        data = r.json()
+        assert "correlations" in data
+        assert "total_events" in data
+
+
 class TestRemediation:
     def test_remediate_with_issue(self):
         r = client.post("/api/ai/remediate", json={
