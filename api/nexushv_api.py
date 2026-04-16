@@ -3154,6 +3154,66 @@ def compare_hosts():
         "recommendation": "Cluster is balanced" if len(hosts) < 2 or abs(hosts[0]["cpu_pct"] - hosts[-1]["cpu_pct"]) < 20 else "Consider migrating VMs from overloaded host",
     }
 
+# ── VM Uptime Tracking ────────────────────────────────────────────────────
+@app.get("/api/vms/{name}/uptime", tags=["Virtual Machines"])
+def get_vm_uptime(name: str):
+    """Get VM uptime and availability statistics."""
+    if DEMO_MODE:
+        vm = next((v for v in _MOCK_VMS if v["name"] == name), None)
+        if not vm:
+            raise HTTPException(404, f"VM '{name}' not found")
+        uptime_s = vm.get("uptime_s", 0)
+        return {
+            "vm": name,
+            "state": vm["state"],
+            "uptime_seconds": uptime_s,
+            "uptime_human": f"{uptime_s // 86400}d {(uptime_s % 86400) // 3600}h {(uptime_s % 3600) // 60}m",
+            "availability_pct": 99.95 if vm["state"] == "poweredOn" else 0,
+        }
+    conn = get_conn()
+    try:
+        dom = conn.lookupByName(name)
+        state, _ = dom.state()
+        return {"vm": name, "state": STATE_MAP.get(state, "unknown")}
+    except libvirt.libvirtError:
+        raise HTTPException(404, f"VM '{name}' not found")
+    finally:
+        conn.close()
+
+# ── Cluster Summary ───────────────────────────────────────────────────────
+@app.get("/api/cluster/summary", tags=["Cluster"])
+def cluster_summary():
+    """One-line cluster health summary for monitoring integrations."""
+    vms = list_vms()
+    host = local_host_info()
+    on = len([v for v in vms if v["state"] == "poweredOn"])
+    return {
+        "status": "healthy" if host["cpu_pct"] < 80 and host.get("ram_pct", 0) < 85 else "degraded",
+        "vms_running": on,
+        "vms_total": len(vms),
+        "host_cpu_pct": host["cpu_pct"],
+        "host_ram_pct": host.get("ram_pct", 0),
+        "host_disk_pct": host.get("disk_pct", 0),
+        "ai_available": AI_AVAILABLE,
+        "demo_mode": DEMO_MODE,
+    }
+
+# ── Readiness / Liveness Probes ───────────────────────────────────────────
+@app.get("/healthz", tags=["System"], include_in_schema=False)
+def liveness():
+    """Kubernetes liveness probe."""
+    return {"status": "alive"}
+
+@app.get("/readyz", tags=["System"], include_in_schema=False)
+def readiness():
+    """Kubernetes readiness probe — checks database connectivity."""
+    try:
+        with get_db() as db:
+            db.execute("SELECT 1")
+        return {"status": "ready"}
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "not_ready"})
+
 # ── System Diagnostics ────────────────────────────────────────────────────
 @app.get("/api/diagnostics", tags=["System"])
 def system_diagnostics():
