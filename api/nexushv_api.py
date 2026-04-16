@@ -2591,6 +2591,123 @@ def get_console_websocket(name: str):
     finally:
         conn.close()
 
+# ── VM Power Schedule ─────────────────────────────────────────────────────
+class PowerSchedule(BaseModel):
+    vm_name: str
+    action: str = Field(..., pattern=r"^(start|stop)$")
+    schedule: str = Field(..., description="Cron-style: HH:MM or day-of-week HH:MM")
+    enabled: bool = True
+
+@app.get("/api/power-schedules", tags=["Scheduling"])
+def list_power_schedules():
+    """List all VM power schedules (auto start/stop at specific times)."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'power_schedules'").fetchone()
+        return json.loads(row["value"]) if row else []
+
+@app.post("/api/power-schedules", tags=["Scheduling"])
+def create_power_schedule(schedule: PowerSchedule):
+    """Create a scheduled power action for a VM."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'power_schedules'").fetchone()
+        schedules = json.loads(row["value"]) if row else []
+        schedules.append(schedule.model_dump())
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('power_schedules', ?)", (json.dumps(schedules),))
+    audit_log("system", "power_schedule", schedule.vm_name, f"{schedule.action} at {schedule.schedule}")
+    return {"status": "created", "schedule": schedule.model_dump()}
+
+@app.delete("/api/power-schedules/{vm_name}", tags=["Scheduling"])
+def delete_power_schedule(vm_name: str):
+    """Delete all power schedules for a VM."""
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = 'power_schedules'").fetchone()
+        if row:
+            schedules = json.loads(row["value"])
+            schedules = [s for s in schedules if s["vm_name"] != vm_name]
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('power_schedules', ?)", (json.dumps(schedules),))
+    return {"status": "deleted", "vm_name": vm_name}
+
+# ── Resource Usage Report ─────────────────────────────────────────────────
+@app.get("/api/reports/resource-usage", tags=["Reports"])
+def resource_usage_report(hours: int = 24):
+    """Generate a resource usage report for the specified period."""
+    vms = list_vms()
+    host = local_host_info()
+
+    on_vms = [v for v in vms if v["state"] == "poweredOn"]
+    total_vcpu = sum(v.get("cpu", 0) for v in vms)
+    total_ram_gb = round(sum(v.get("ram_mb", 0) for v in vms) / 1024, 1)
+
+    # Get historical metrics
+    with get_db() as db:
+        cpu_avg = db.execute(
+            "SELECT AVG(value) as avg_val, MAX(value) as max_val, MIN(value) as min_val FROM metrics_history WHERE metric_type = 'host_cpu' AND ts > datetime('now', ?)",
+            (f"-{min(hours, 168)} hours",)
+        ).fetchone()
+        ram_avg = db.execute(
+            "SELECT AVG(value) as avg_val, MAX(value) as max_val, MIN(value) as min_val FROM metrics_history WHERE metric_type = 'host_ram' AND ts > datetime('now', ?)",
+            (f"-{min(hours, 168)} hours",)
+        ).fetchone()
+        event_count = db.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE ts > datetime('now', ?)",
+            (f"-{min(hours, 168)} hours",)
+        ).fetchone()[0]
+        alert_count = db.execute(
+            "SELECT COUNT(*) FROM alerts WHERE ts > datetime('now', ?)",
+            (f"-{min(hours, 168)} hours",)
+        ).fetchone()[0]
+
+    return {
+        "period_hours": hours,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "host": {
+            "hostname": host["hostname"],
+            "cpu_cores": host["cpu_count"],
+            "ram_gb": host["ram_total_gb"],
+            "current_cpu_pct": host["cpu_pct"],
+            "current_ram_pct": host.get("ram_pct", 0),
+        },
+        "cpu_stats": {
+            "avg_pct": round(cpu_avg["avg_val"], 1) if cpu_avg and cpu_avg["avg_val"] else 0,
+            "max_pct": round(cpu_avg["max_val"], 1) if cpu_avg and cpu_avg["max_val"] else 0,
+            "min_pct": round(cpu_avg["min_val"], 1) if cpu_avg and cpu_avg["min_val"] else 0,
+        },
+        "ram_stats": {
+            "avg_pct": round(ram_avg["avg_val"], 1) if ram_avg and ram_avg["avg_val"] else 0,
+            "max_pct": round(ram_avg["max_val"], 1) if ram_avg and ram_avg["max_val"] else 0,
+            "min_pct": round(ram_avg["min_val"], 1) if ram_avg and ram_avg["min_val"] else 0,
+        },
+        "vms": {
+            "total": len(vms),
+            "running": len(on_vms),
+            "total_vcpu": total_vcpu,
+            "total_ram_gb": total_ram_gb,
+            "per_vm": [{"name": v["name"], "state": v["state"], "cpu": v.get("cpu", 0), "ram_gb": round(v.get("ram_mb", 0) / 1024, 1), "cpu_pct": v.get("cpu_pct", 0)} for v in vms],
+        },
+        "activity": {
+            "total_events": event_count,
+            "total_alerts": alert_count,
+        },
+    }
+
+# ── AI Conversation History ──────────────────────────────────────────────
+@app.get("/api/ai/history", tags=["NEXUS AI"])
+def get_ai_history():
+    """Get AI conversation history for the current session."""
+    if not AI_AVAILABLE or not ai:
+        return {"history": [], "length": 0}
+    return {
+        "history": ai.history[-20:],
+        "length": len(ai.history),
+    }
+
+@app.post("/api/ai/reset", tags=["NEXUS AI"])
+def reset_ai_conversation():
+    """Reset AI conversation history (start fresh)."""
+    if AI_AVAILABLE and ai:
+        ai.reset_conversation()
+    return {"status": "reset", "history_length": 0}
+
 # ── Cluster Comparison (multi-host) ───────────────────────────────────────
 @app.get("/api/cluster/compare", tags=["Cluster"])
 def compare_hosts():

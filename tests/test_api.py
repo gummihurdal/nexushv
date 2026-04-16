@@ -392,6 +392,50 @@ class TestResize:
         assert r.status_code == 404
 
 
+class TestPowerSchedules:
+    def test_list_schedules(self):
+        r = client.get("/api/power-schedules")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_create_schedule(self):
+        r = client.post("/api/power-schedules", json={
+            "vm_name": "dev-sandbox-01", "action": "start", "schedule": "08:00"
+        })
+        assert r.status_code == 200
+
+    def test_delete_schedule(self):
+        client.post("/api/power-schedules", json={
+            "vm_name": "test-sched-vm", "action": "stop", "schedule": "22:00"
+        })
+        r = client.delete("/api/power-schedules/test-sched-vm")
+        assert r.status_code == 200
+
+
+class TestReports:
+    def test_resource_usage_report(self):
+        r = client.get("/api/reports/resource-usage?hours=24")
+        assert r.status_code == 200
+        data = r.json()
+        assert "host" in data
+        assert "cpu_stats" in data
+        assert "ram_stats" in data
+        assert "vms" in data
+        assert "activity" in data
+
+
+class TestAIHistory:
+    def test_get_history(self):
+        r = client.get("/api/ai/history")
+        assert r.status_code == 200
+        assert "history" in r.json()
+
+    def test_reset_conversation(self):
+        r = client.post("/api/ai/reset")
+        assert r.status_code == 200
+        assert r.json()["history_length"] == 0
+
+
 class TestSearch:
     def test_search_vms(self):
         r = client.get("/api/search?q=prod")
