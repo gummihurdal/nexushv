@@ -4244,11 +4244,15 @@ try:
     from modules.predictive_ai import router as predictive_ai_router
     from modules.enterprise_auth import router as enterprise_auth_router
     from modules.zero_touch import router as zero_touch_router
+    from modules.disaster_recovery import router as dr_router
+    from modules.drs_engine import router as drs_engine_router
     app.include_router(storage_fabric_router)
     app.include_router(predictive_ai_router)
     app.include_router(enterprise_auth_router)
     app.include_router(zero_touch_router)
-    log.info("Enterprise modules loaded: storage-fabric, predictive-ai, enterprise-auth, zero-touch")
+    app.include_router(dr_router)
+    app.include_router(drs_engine_router)
+    log.info("Enterprise modules loaded: storage-fabric, predictive-ai, enterprise-auth, zero-touch, dr, drs")
 except Exception as e:
     log.warning(f"Enterprise modules not loaded: {e}")
 
