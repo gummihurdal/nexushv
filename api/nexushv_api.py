@@ -4237,6 +4237,23 @@ def system_diagnostics():
 
 # ── Serve frontend static files ──────────────────────────────────────────
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "ui", "dist")
+# ── Enterprise Modules ────────────────────────────────────────────────────
+try:
+    sys.path.insert(0, os.path.dirname(__file__))
+    from modules.storage_fabric import router as storage_fabric_router
+    from modules.predictive_ai import router as predictive_ai_router
+    from modules.enterprise_auth import router as enterprise_auth_router
+    from modules.zero_touch import router as zero_touch_router
+    app.include_router(storage_fabric_router)
+    app.include_router(predictive_ai_router)
+    app.include_router(enterprise_auth_router)
+    app.include_router(zero_touch_router)
+    log.info("Enterprise modules loaded: storage-fabric, predictive-ai, enterprise-auth, zero-touch")
+except Exception as e:
+    log.warning(f"Enterprise modules not loaded: {e}")
+
+# ── Serve frontend static files ──────────────────────────────────────────
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "ui", "dist")
 if os.path.isdir(FRONTEND_DIR):
     app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIR, "assets")), name="assets")
 

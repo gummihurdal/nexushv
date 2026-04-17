@@ -1,0 +1,90 @@
+# NexusHV Ansible Collection — gummihurdal.nexushv
+# Install: ansible-galaxy collection install gummihurdal.nexushv
+# Usage: See examples below
+
+---
+# Example playbook: Provision VMs on NexusHV
+- name: Deploy application stack on NexusHV
+  hosts: localhost
+  collections:
+    - gummihurdal.nexushv
+  vars:
+    nexushv_url: "https://nexushv.example.com:8080"
+    nexushv_token: "{{ lookup('env', 'NEXUSHV_TOKEN') }}"
+
+  tasks:
+    - name: Get JWT token
+      uri:
+        url: "{{ nexushv_url }}/api/auth/login"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ nexushv_username }}"
+          password: "{{ nexushv_password }}"
+        status_code: 200
+      register: auth
+      no_log: true
+
+    - name: Set token
+      set_fact:
+        nexushv_token: "{{ auth.json.token }}"
+
+    - name: Create web servers from template
+      uri:
+        url: "{{ nexushv_url }}/api/templates/template-ubuntu-22/deploy"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ nexushv_token }}"
+        body_format: json
+        body:
+          new_name: "web-{{ item }}"
+          cpu: 4
+          ram_gb: 8
+      loop: "{{ range(1, 4) | list }}"
+      register: web_vms
+
+    - name: Create database server
+      uri:
+        url: "{{ nexushv_url }}/api/templates/template-database/deploy"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ nexushv_token }}"
+        body_format: json
+        body:
+          new_name: "db-primary"
+          cpu: 8
+          ram_gb: 32
+
+    - name: Start all VMs
+      uri:
+        url: "{{ nexushv_url }}/api/batch/vm-action"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ nexushv_token }}"
+        body_format: json
+        body:
+          vm_names: ["web-1", "web-2", "web-3", "db-primary"]
+          action: "start"
+
+    - name: Set snapshot policies
+      uri:
+        url: "{{ nexushv_url }}/api/snapshot-policies"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ nexushv_token }}"
+        body_format: json
+        body:
+          vm_name: "{{ item }}"
+          interval_hours: 24
+          max_snapshots: 7
+      loop: ["web-1", "web-2", "web-3", "db-primary"]
+
+    - name: Verify cluster health
+      uri:
+        url: "{{ nexushv_url }}/api/diagnostics"
+        method: GET
+      register: health
+
+    - name: Report health
+      debug:
+        msg: "Cluster health: {{ health.json.overall }}"
